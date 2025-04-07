@@ -1,0 +1,8 @@
+valid loss:	0.33934028185904025
+valid iou:	0.8472054783453544
+valid dice:	0.9120130492233253
+valid loss:	0.3394858792424202
+valid iou:	0.8475107084784265
+valid dice:	0.9121911716516025
+
+ val loss: 0.3395  val iou: 0.8475  val dice:0.9122  val acc:0.9726  val pre:0.9730
