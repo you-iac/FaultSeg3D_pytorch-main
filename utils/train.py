@@ -21,13 +21,12 @@ def train(args):
     print("Loading data ... ")
     train_loader, val_loader = load_data(args)
     print('Create model...')
-    #
+
     model = FaultSeg3D(args.in_channels, args.out_channels)
 
     if torch.cuda.device_count() > 1:  # 检查电脑是否有多块GPU
         print(f"Let's use {torch.cuda.device_count()} GPUs!")
         model = nn.DataParallel(model)  # 将模型对象转变为多GPU并行运算的模型
-
     model.to(args.device)
 
     # Initialize optimizer
