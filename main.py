@@ -85,15 +85,10 @@ if __name__ == "__main__":
 
     main(args)
 
-
-# python main.py --mode train --exp train_50 --train_path ./data/train/ --valid_path ./data/valid/ --epochs 50
-# python main.py --mode train --exp train_dataset800_epoch50 --train_path ./data/data_3D_800/train/ --valid_path ./data/data_3D_800/valid/ --epochs 50
-# python main.py --mode train --exp train_dataset800_epoch100 --train_path ./data/data_3D_800/train/ --valid_path ./data/data_3D_800/valid/ --epochs 100
-
-# python main.py --mode pred --exp train_dataset800_epoch100 --train_path ./data/data_3D_800/train/ --valid_path ./data/data_3D_800/valid/ --epochs 100 --pred_data_name kerry3d
-
-# python main.py --mode pred --exp train_dataset800_epoch100  --pred_data_name kerry3d --pred_path D:/data/kerry3D.npy
-
-# python main.py --mode pred --exp UNetPP_800_50  --pred_data_name kerry3d --pred_path D:/data/kerry3D.npy
-
-# python main.py --mode valid_only --exp UNetPP_800_50  --pred_data_name kerry3d --pred_path D:/data/kerry3D.npy
+# 训练
+# python main.py --mode train --exp *** --train_path ./data/train/ --valid_path ./data/valid/ --epochs 50
+# python main.py --mode train --exp *** --train_path ./data/data_3D_800/train/ --valid_path ./data/data_3D_800/valid/ --epochs 50
+# 预测
+# python main.py --mode pred --exp  ***  --pred_data_name *** --pred_path D:/data/***
+# 验证
+# python main.py --mode valid_only --exp ***
