@@ -1,0 +1,19 @@
+[Train] Epoch1/25:   0%|          | 0/100 [00:00<?, ?it/s]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   1%|          | 1/100 [00:22<37:49, 22.92s/it]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   2%|▏         | 2/100 [00:40<32:30, 19.90s/it]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   3%|▎         | 3/100 [00:58<30:34, 18.92s/it]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   4%|▍         | 4/100 [01:16<29:28, 18.43s/it]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   5%|▌         | 5/100 [01:33<28:41, 18.12s/it]C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
+[Train] Epoch1/25:   6%|▌         | 6/100 [01:51<28:17, 18.06s/it]
+
+
+
+
+:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\cuda\nccl.py:15: UserWarning: PyTorch is not compiled with NCCL support
+  warnings.warn('PyTorch is not compiled with NCCL support')
