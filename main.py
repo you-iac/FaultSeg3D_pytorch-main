@@ -2,6 +2,10 @@
 import os
 import argparse
 
+import torch
+from torch import nn
+
+from models.faultseg3d import FaultSeg3D
 from utils.train import train, valid
 from utils.test import pred_Gaussian
 from utils.tools import save_args_info
@@ -64,6 +68,21 @@ def main(args):
 
 if __name__ == "__main__":
     args = add_args()
+
+    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    # print(device)
+    # print(torch.cuda.device_count())
+    #
+    # model = FaultSeg3D(args.in_channels, args.out_channels) #载入模型
+    #
+    # if torch.cuda.device_count() > 1:  # 检查电脑是否有多块GPU
+    #     print(f"Let's use {torch.cuda.device_count()} GPUs!")
+    #     model = nn.DataParallel(model)  # 将模型对象转变为多GPU并行运算的模型
+    #
+    # model.to(args.device)  # 把并行的模型移动到GPU上
+
+
+
     main(args)
 
 
