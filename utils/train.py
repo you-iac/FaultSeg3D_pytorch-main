@@ -24,9 +24,10 @@ def train(args):
 
     model = FaultSeg3D(args.in_channels, args.out_channels)
 
-    if torch.cuda.device_count() > 1:  # 检查电脑是否有多块GPU
-        print(f"Let's use {torch.cuda.device_count()} GPUs!")
-        model = nn.DataParallel(model)  # 将模型对象转变为多GPU并行运算的模型
+    #windows下不支持调用NCCL这种方式实现多GPU训练
+    # if torch.cuda.device_count() > 1:  # 检查电脑是否有多块GPU
+    #     print(f"Let's use {torch.cuda.device_count()} GPUs!")
+    #     model = nn.DataParallel(model)  # 将模型对象转变为多GPU并行运算的模型
     model.to(args.device)
 
     # Initialize optimizer
