@@ -99,7 +99,7 @@ def pred_Gaussian(args):
         os.makedirs(save_path + '/numpy/')
     if not os.path.exists(save_path + '/picture/'):
         os.makedirs(save_path + '/picture/')
-    np.save(save_path + '/numpy/' + args.pred_data_name + '.npy', output_data)
+    np.save(save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy', output_data)
 
     save_pred_picture(input_data, output_data, save_path + '/picture/', args.pred_data_name)
     print("Finish!!!")
