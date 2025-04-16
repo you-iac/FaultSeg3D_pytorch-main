@@ -81,6 +81,8 @@ if __name__ == "__main__":
     #
     # model.to(args.device)  # 把并行的模型移动到GPU上
 
+
+
     main(args)
 
 # 训练
