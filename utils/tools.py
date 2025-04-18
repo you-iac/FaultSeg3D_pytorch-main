@@ -81,21 +81,33 @@ def compute_loss(outputs, labels, args):
     if args.loss_func == 'dice':
         criterion = DiceLoss().to(args.device)
         loss = criterion(outputs, labels)
-
         return loss
 
     elif args.loss_func == 'cross_with_weight':
         neg = (1 - labels).sum()  # 算有多少个0
         pos = labels.sum()  # 算有多少个1
         beta = neg / (neg + pos)
-
         weight = torch.tensor([1 - beta, beta]).to(args.device)
-
         loss = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
-
         return loss
-    else:
-        raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss'] loss is supported.")
+    elif args.loss_func == 'dice_plus_ce':
+        # 计算Dice Loss
+        criterion_dice = DiceLoss().to(args.device)
+        loss_dice = criterion_dice(outputs, labels)
+
+        # 计算加权交叉熵损失
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+
+        # 组合损失（可调整权重系数）
+        combined_loss = loss_dice + loss_ce  # 简单相加
+        # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
+        return combined_loss
+    else :
+        raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
 
 
 def con_matrix(outputs, labels, args):

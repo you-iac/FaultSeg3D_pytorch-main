@@ -2,6 +2,7 @@
 import os
 import argparse
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -24,7 +25,7 @@ def add_args():
     parser.add_argument("--valid_path", default="./data/valid/", type=str, help="dataset directory")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
     parser.add_argument("--out_channels", default=2, type=int, help="number of output channels")
-    parser.add_argument("--loss_func", default="cross_with_weight", choices=['dice', 'cross_with_weight'], type=str, help="choose loss function")
+    parser.add_argument("--loss_func", default="cross_with_weight", choices=['dice', 'cross_with_weight','dice_plus_ce'], type=str, help="choose loss function")
     parser.add_argument("--val_every", default=10, type=int, help="validation frequency")
     parser.add_argument("--optim_lr", default=1e-4, type=float, help="optimization learning rate")
     parser.add_argument("--workers", default=0, type=int, help="number of workers")
@@ -80,8 +81,6 @@ if __name__ == "__main__":
     #     model = nn.DataParallel(model)  # 将模型对象转变为多GPU并行运算的模型
     #
     # model.to(args.device)  # 把并行的模型移动到GPU上
-
-
 
     main(args)
 
