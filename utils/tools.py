@@ -91,6 +91,7 @@ def compute_loss(outputs, labels, args):
         loss = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
         return loss
     elif args.loss_func == 'dice_plus_ce':
+        # print("dice_plus_ce");
         # 计算Dice Loss
         criterion_dice = DiceLoss().to(args.device)
         loss_dice = criterion_dice(outputs, labels)
