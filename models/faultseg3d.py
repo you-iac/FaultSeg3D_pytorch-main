@@ -1,25 +1,39 @@
 import torch
-from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
+from torchsummary import summary
 
 
-class DoubleConv(nn.Module):
-    def __init__(self, in_channels, out_channels, mid_channels=None):
-        super().__init__()
-        if not mid_channels:
-            mid_channels = out_channels
-        self.double_conv = nn.Sequential(
-            nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(mid_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True)
-        )
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm3d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm3d(out_channels)
+
+        # 跳跃连接
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm3d(out_channels)
+            )
 
     def forward(self, x):
-        return self.double_conv(x)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        # 残差连接
+        out += self.shortcut(x)
+        out = self.relu(out)
+
+        return out
 
 
 class Down(nn.Module):
@@ -27,7 +41,7 @@ class Down(nn.Module):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool3d(2),
-            DoubleConv(in_channels, out_channels)
+            ResidualBlock(in_channels, out_channels)
         )
 
     def forward(self, x):
@@ -39,7 +53,7 @@ class Up(nn.Module):
         super().__init__()
 
         self.up = nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=True)
-        self.conv = DoubleConv(in_channels, out_channels)
+        self.conv = ResidualBlock(in_channels, out_channels)
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -68,7 +82,7 @@ class FaultSeg3D(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        self.inc = DoubleConv(n_channels, 16)
+        self.inc = ResidualBlock(n_channels, 16)
         self.down1 = Down(16, 32)
         self.down2 = Down(32, 64)
         self.down3 = Down(64, 128)
@@ -104,77 +118,91 @@ if __name__ == '__main__':
 # ----------------------------------------------------------------
 #         Layer (type)               Output Shape         Param #
 # ================================================================
-#             Conv3d-1    [-1, 16, 128, 128, 128]             448
+#             Conv3d-1    [-1, 16, 128, 128, 128]             432
 #        BatchNorm3d-2    [-1, 16, 128, 128, 128]              32
 #               ReLU-3    [-1, 16, 128, 128, 128]               0
-#             Conv3d-4    [-1, 16, 128, 128, 128]           6,928
+#             Conv3d-4    [-1, 16, 128, 128, 128]           6,912
 #        BatchNorm3d-5    [-1, 16, 128, 128, 128]              32
-#               ReLU-6    [-1, 16, 128, 128, 128]               0
-#         DoubleConv-7    [-1, 16, 128, 128, 128]               0
-#          MaxPool3d-8       [-1, 16, 64, 64, 64]               0
-#             Conv3d-9       [-1, 32, 64, 64, 64]          13,856
-#       BatchNorm3d-10       [-1, 32, 64, 64, 64]              64
-#              ReLU-11       [-1, 32, 64, 64, 64]               0
-#            Conv3d-12       [-1, 32, 64, 64, 64]          27,680
-#       BatchNorm3d-13       [-1, 32, 64, 64, 64]              64
-#              ReLU-14       [-1, 32, 64, 64, 64]               0
-#        DoubleConv-15       [-1, 32, 64, 64, 64]               0
-#              Down-16       [-1, 32, 64, 64, 64]               0
-#         MaxPool3d-17       [-1, 32, 32, 32, 32]               0
-#            Conv3d-18       [-1, 64, 32, 32, 32]          55,360
-#       BatchNorm3d-19       [-1, 64, 32, 32, 32]             128
-#              ReLU-20       [-1, 64, 32, 32, 32]               0
-#            Conv3d-21       [-1, 64, 32, 32, 32]         110,656
-#       BatchNorm3d-22       [-1, 64, 32, 32, 32]             128
-#              ReLU-23       [-1, 64, 32, 32, 32]               0
-#        DoubleConv-24       [-1, 64, 32, 32, 32]               0
-#              Down-25       [-1, 64, 32, 32, 32]               0
-#         MaxPool3d-26       [-1, 64, 16, 16, 16]               0
-#            Conv3d-27      [-1, 128, 16, 16, 16]         221,312
-#       BatchNorm3d-28      [-1, 128, 16, 16, 16]             256
-#              ReLU-29      [-1, 128, 16, 16, 16]               0
-#            Conv3d-30      [-1, 128, 16, 16, 16]         442,496
-#       BatchNorm3d-31      [-1, 128, 16, 16, 16]             256
-#              ReLU-32      [-1, 128, 16, 16, 16]               0
-#        DoubleConv-33      [-1, 128, 16, 16, 16]               0
-#              Down-34      [-1, 128, 16, 16, 16]               0
-#          Upsample-35      [-1, 128, 32, 32, 32]               0
-#            Conv3d-36       [-1, 64, 32, 32, 32]         331,840
-#       BatchNorm3d-37       [-1, 64, 32, 32, 32]             128
-#              ReLU-38       [-1, 64, 32, 32, 32]               0
-#            Conv3d-39       [-1, 64, 32, 32, 32]         110,656
-#       BatchNorm3d-40       [-1, 64, 32, 32, 32]             128
-#              ReLU-41       [-1, 64, 32, 32, 32]               0
-#        DoubleConv-42       [-1, 64, 32, 32, 32]               0
-#                Up-43       [-1, 64, 32, 32, 32]               0
-#          Upsample-44       [-1, 64, 64, 64, 64]               0
-#            Conv3d-45       [-1, 32, 64, 64, 64]          82,976
-#       BatchNorm3d-46       [-1, 32, 64, 64, 64]              64
-#              ReLU-47       [-1, 32, 64, 64, 64]               0
-#            Conv3d-48       [-1, 32, 64, 64, 64]          27,680
-#       BatchNorm3d-49       [-1, 32, 64, 64, 64]              64
-#              ReLU-50       [-1, 32, 64, 64, 64]               0
-#        DoubleConv-51       [-1, 32, 64, 64, 64]               0
-#                Up-52       [-1, 32, 64, 64, 64]               0
-#          Upsample-53    [-1, 32, 128, 128, 128]               0
-#            Conv3d-54    [-1, 16, 128, 128, 128]          20,752
-#       BatchNorm3d-55    [-1, 16, 128, 128, 128]              32
-#              ReLU-56    [-1, 16, 128, 128, 128]               0
-#            Conv3d-57    [-1, 16, 128, 128, 128]           6,928
-#       BatchNorm3d-58    [-1, 16, 128, 128, 128]              32
-#              ReLU-59    [-1, 16, 128, 128, 128]               0
-#        DoubleConv-60    [-1, 16, 128, 128, 128]               0
-#                Up-61    [-1, 16, 128, 128, 128]               0
-#            Conv3d-62     [-1, 2, 128, 128, 128]              34
-#           OutConv-63     [-1, 2, 128, 128, 128]               0
-#           Softmax-64     [-1, 2, 128, 128, 128]               0
+#             Conv3d-6    [-1, 16, 128, 128, 128]              16
+#        BatchNorm3d-7    [-1, 16, 128, 128, 128]              32
+#               ReLU-8    [-1, 16, 128, 128, 128]               0
+#      ResidualBlock-9    [-1, 16, 128, 128, 128]               0
+#         MaxPool3d-10       [-1, 16, 64, 64, 64]               0
+#            Conv3d-11       [-1, 32, 64, 64, 64]          13,824
+#       BatchNorm3d-12       [-1, 32, 64, 64, 64]              64
+#              ReLU-13       [-1, 32, 64, 64, 64]               0
+#            Conv3d-14       [-1, 32, 64, 64, 64]          27,648
+#       BatchNorm3d-15       [-1, 32, 64, 64, 64]              64
+#            Conv3d-16       [-1, 32, 64, 64, 64]             512
+#       BatchNorm3d-17       [-1, 32, 64, 64, 64]              64
+#              ReLU-18       [-1, 32, 64, 64, 64]               0
+#     ResidualBlock-19       [-1, 32, 64, 64, 64]               0
+#              Down-20       [-1, 32, 64, 64, 64]               0
+#         MaxPool3d-21       [-1, 32, 32, 32, 32]               0
+#            Conv3d-22       [-1, 64, 32, 32, 32]          55,296
+#       BatchNorm3d-23       [-1, 64, 32, 32, 32]             128
+#              ReLU-24       [-1, 64, 32, 32, 32]               0
+#            Conv3d-25       [-1, 64, 32, 32, 32]         110,592
+#       BatchNorm3d-26       [-1, 64, 32, 32, 32]             128
+#            Conv3d-27       [-1, 64, 32, 32, 32]           2,048
+#       BatchNorm3d-28       [-1, 64, 32, 32, 32]             128
+#              ReLU-29       [-1, 64, 32, 32, 32]               0
+#     ResidualBlock-30       [-1, 64, 32, 32, 32]               0
+#              Down-31       [-1, 64, 32, 32, 32]               0
+#         MaxPool3d-32       [-1, 64, 16, 16, 16]               0
+#            Conv3d-33      [-1, 128, 16, 16, 16]         221,184
+#       BatchNorm3d-34      [-1, 128, 16, 16, 16]             256
+#              ReLU-35      [-1, 128, 16, 16, 16]               0
+#            Conv3d-36      [-1, 128, 16, 16, 16]         442,368
+#       BatchNorm3d-37      [-1, 128, 16, 16, 16]             256
+#            Conv3d-38      [-1, 128, 16, 16, 16]           8,192
+#       BatchNorm3d-39      [-1, 128, 16, 16, 16]             256
+#              ReLU-40      [-1, 128, 16, 16, 16]               0
+#     ResidualBlock-41      [-1, 128, 16, 16, 16]               0
+#              Down-42      [-1, 128, 16, 16, 16]               0
+#          Upsample-43      [-1, 128, 32, 32, 32]               0
+#            Conv3d-44       [-1, 64, 32, 32, 32]         331,776
+#       BatchNorm3d-45       [-1, 64, 32, 32, 32]             128
+#              ReLU-46       [-1, 64, 32, 32, 32]               0
+#            Conv3d-47       [-1, 64, 32, 32, 32]         110,592
+#       BatchNorm3d-48       [-1, 64, 32, 32, 32]             128
+#            Conv3d-49       [-1, 64, 32, 32, 32]          12,288
+#       BatchNorm3d-50       [-1, 64, 32, 32, 32]             128
+#              ReLU-51       [-1, 64, 32, 32, 32]               0
+#     ResidualBlock-52       [-1, 64, 32, 32, 32]               0
+#                Up-53       [-1, 64, 32, 32, 32]               0
+#          Upsample-54       [-1, 64, 64, 64, 64]               0
+#            Conv3d-55       [-1, 32, 64, 64, 64]          82,944
+#       BatchNorm3d-56       [-1, 32, 64, 64, 64]              64
+#              ReLU-57       [-1, 32, 64, 64, 64]               0
+#            Conv3d-58       [-1, 32, 64, 64, 64]          27,648
+#       BatchNorm3d-59       [-1, 32, 64, 64, 64]              64
+#            Conv3d-60       [-1, 32, 64, 64, 64]           3,072
+#       BatchNorm3d-61       [-1, 32, 64, 64, 64]              64
+#              ReLU-62       [-1, 32, 64, 64, 64]               0
+#     ResidualBlock-63       [-1, 32, 64, 64, 64]               0
+#                Up-64       [-1, 32, 64, 64, 64]               0
+#          Upsample-65    [-1, 32, 128, 128, 128]               0
+#            Conv3d-66    [-1, 16, 128, 128, 128]          20,736
+#       BatchNorm3d-67    [-1, 16, 128, 128, 128]              32
+#              ReLU-68    [-1, 16, 128, 128, 128]               0
+#            Conv3d-69    [-1, 16, 128, 128, 128]           6,912
+#       BatchNorm3d-70    [-1, 16, 128, 128, 128]              32
+#            Conv3d-71    [-1, 16, 128, 128, 128]             768
+#       BatchNorm3d-72    [-1, 16, 128, 128, 128]              32
+#              ReLU-73    [-1, 16, 128, 128, 128]               0
+#     ResidualBlock-74    [-1, 16, 128, 128, 128]               0
+#                Up-75    [-1, 16, 128, 128, 128]               0
+#            Conv3d-76     [-1, 2, 128, 128, 128]              34
+#           OutConv-77     [-1, 2, 128, 128, 128]               0
+#           Softmax-78     [-1, 2, 128, 128, 128]               0
 # ================================================================
-# Total params: 1,461,010
-# Trainable params: 1,461,010
+# Total params: 1,487,906
+# Trainable params: 1,487,906
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 5962.00
-# Params size (MB): 5.57
-# Estimated Total Size (MB): 5975.57
+# Forward/backward pass size (MB): 7314.00
+# Params size (MB): 5.68
+# Estimated Total Size (MB): 7327.68
 # ----------------------------------------------------------------
