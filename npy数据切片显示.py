@@ -38,7 +38,7 @@ if __name__ == '__main__':
     else:
         os.makedirs(filename + '/')
 
-    for i in range(0, data.shape[0], 50):
+    for i in range(0, data.shape[0], 10):
         # 创建新Figure并显式关闭
         fig = plt.figure(figsize=(fig_width, fig_height))
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
@@ -46,27 +46,27 @@ if __name__ == '__main__':
 
         plt.savefig(f'{filename}/T-{i}.png')
         plt.close(fig)  # 明确关闭Figure释放内存
-
+    print('#')
     fig_width = data.shape[2] / 20 + 2      # +2 的目的是显示times刻度
     fig_height = data.shape[0] / 20
     ###########   Y
-    for i in range(0, data.shape[1], 50):
+    for i in range(0, data.shape[1], 10):
         fig = plt.figure(figsize=(fig_width, fig_height))
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
         plt.imshow(data[:,i,:], vmin=-0.01, vmax=0.01, aspect=1)
         plt.savefig(f'{filename}/X-{i}.png')
         plt.close(fig)  # 明确关闭Figure释放内存
-
+    print('#')
     fig_width = data.shape[1] / 20 + 2      # +2 的目的是显示times刻度
     fig_height = data.shape[0] / 20 + 2
     ###########   Y
-    for i in range(0, data.shape[2], 50):
+    for i in range(0, data.shape[2], 10):
         fig = plt.figure(figsize=(fig_width, fig_height))
         plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
         plt.imshow(data[:,:,i], vmin=-0.01, vmax=0.01, aspect=1)
         plt.savefig(f'{filename}/Y-{i}.png')
         plt.close(fig)  # 明确关闭Figure释放内存
-
+    print('#')
 
 
 
