@@ -1,5 +1,5 @@
 ------------------ start ------------------
-exp : 400_50_Unet_
+exp : 400_50_UNet_
 device : cuda:0
 mode : pred
 batch_size : 2
@@ -14,8 +14,8 @@ val_every : 10
 optim_lr : 0.0001
 workers : 0
 pretrained_model_name : FaultSeg3D_BEST.pth
-pred_data_name : PCB
-pred_path : D:/data/000NPY/PCB10011008700.npy
+pred_data_name : F3
+pred_path : D:/F3.npy
 overlap : 0.25
 threshold : 0.5
 sigma : 0.0
