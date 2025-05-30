@@ -82,8 +82,8 @@ class DoubleConv(nn.Module):
         self.CA_Block_3D = CA_Block_3D(out_channels)
 
     def forward(self, x):
-
-        return self.CA_Block_3D(self.double_conv(x))
+        T = self.double_conv(x)
+        return self.CA_Block_3D(T)
 
 
 class Down(nn.Module):

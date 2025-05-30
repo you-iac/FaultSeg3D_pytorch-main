@@ -14,7 +14,7 @@ val_every : 10
 optim_lr : 0.0001
 workers : 0
 pretrained_model_name : FaultSeg3D_BEST.pth
-pred_data_name : F3
+pred_data_name : F3_
 pred_path : D:/F3.npy
 overlap : 0.25
 threshold : 0.5
