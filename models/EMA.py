@@ -1,5 +1,6 @@
 import torch  # 导入 PyTorch 库
 from torch import nn  # 从 PyTorch 中导入神经网络模块
+from torchsummary import summary
 
 
 class EMA(nn.Module):  # 定义一个继承自 nn.Module 的 EMA 类
