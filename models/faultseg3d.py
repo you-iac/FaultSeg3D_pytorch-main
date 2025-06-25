@@ -3,58 +3,67 @@ from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
 
-class EMA3D(nn.Module):  # 定义一个继承自 nn.Module 的 EMA 类
-    def __init__(self, channels, c2=None, factor=16):  # 构造函数，初始化对象
-        super(EMA3D, self).__init__()  # 调用父类的构造函数
-        self.groups = factor  # 定义组的数量为 factor，默认值为 32
-        assert channels // self.groups > 0  # 确保通道数可以被组数整除
+class CA_Block_3D(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(CA_Block_3D, self).__init__()
 
-        self.softmax = nn.Softmax(-1)  # 定义 softmax 层，用于最后一个维度
-        self.agp = nn.AdaptiveAvgPool3d((1, 1, 1))  # 定义自适应平均池化层，输出大小为 1x1
-        self.pool_h = nn.AdaptiveAvgPool3d((1,None, None))  # 定义自适应平均池化层，只在宽度上池化
-        self.pool_w = nn.AdaptiveAvgPool3d((None, 1, None))  # 定义自适应平均池化层，只在高度上池化
-        self.pool_l = nn.AdaptiveAvgPool3d((None,None,1))  # 定义自适应平均池化层，只在高度上池化
-
-        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)  # 定义组归一化层
-        self.conv1x1x1 = nn.Conv3d(
-            channels // self.groups,
-            channels // self.groups,
+        self.conv_1x1x1 = nn.Conv3d(
+            in_channels=channel,
+            out_channels=channel // reduction,
             kernel_size=1,
             stride=1,
-            padding=0
-        )  # 定义 1x1 卷积层
-        self.conv3x3x3 = nn.Conv3d(
-            channels // self.groups,
-            channels // self.groups,
-            kernel_size=3,
+            bias=False
+        )
+
+        self.relu = nn.ReLU()
+        self.bn = nn.BatchNorm3d(channel // reduction)
+
+        # 注意：输出通道数仍为 channel，因为要对原始通道加权
+        self.F_l = nn.Conv3d(
+            in_channels=channel // reduction,
+            out_channels=channel,
+            kernel_size=1,
             stride=1,
-            padding=1
-        )  # 定义 3x3 卷积层
+            bias=False
+        )
+        self.F_w = nn.Conv3d(
+            in_channels=channel // reduction,
+            out_channels=channel,
+            kernel_size=1,
+            stride=1,
+            bias=False
+        )
 
-    def forward(self, x):  # 定义前向传播函数
-        # 2 x 16 x 128 x 128 x 128
-        b, c, h, w, l = x.size()  # 获取输入张量的大小：批次、通道、高度和宽度
-                            #32 x 1 x 128 x 128 x128
-        group_x = x.reshape(b * self.groups, -1, h, w,l)  # 将输入张量重新形状为 (b * 组数, c // 组数, 高度, 宽度)
+        self.sigmoid_l = nn.Sigmoid()
+        self.sigmoid_w = nn.Sigmoid()
 
-        x_h = self.pool_h(group_x)  # 在高度上进行池化        #32 1 1  w l
-        x_w = self.pool_w(group_x).permute(0, 1, 3, 2, 4)  #32 1 h  1 l
-        x_l = self.pool_l(group_x).permute(0, 1, 4, 2, 3)  #32 1 h  w 1
+    def forward(self, x):
+        # 输入尺寸: (batch_size, channel, L, W, H)
+        _, _, H, L, W = x.size()
 
-        hwl = self.conv1x1x1(torch.cat([x_h, x_w, x_l], dim=3))  # 将池化结果拼接并通过 1x1 卷积层
-        x_h, x_w, x_l  = torch.split(hwl, [h, w, l], dim=3)  # 将卷积结果按高度和宽度长度
+        # 沿 H 维度求均值（保留 L 和 W）
+        x_l = torch.mean(x, dim=4, keepdim=True).permute(0, 1, 2, 4, 3)# 形状: (batch, C, H, 1, L)
+        x_w = torch.mean(x, dim=3, keepdim=True)      # 形状: (batch, C, H, 1, W)
 
-        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2, 4).sigmoid() * x_l.permute(0, 1, 4, 2, 3))  # 进行组归一化，并结合高度和宽度的激活结果
 
-        x2 = self.conv3x3x3(group_x)  # 通过 3x3 卷积层
+        # 拼接时忽略 H 维度（因为操作仅针对 L 和 W）
+        x_cat = torch.cat([x_l, x_w], dim=4) #形状:(batch, C, H, 1, W+L)
+        # 降维 + 激活
+        x_cat_conv_relu = self.relu(self.bn(self.conv_1x1x1(x_cat)))
 
-        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x1 进行池化、形状变换、并应用 softmax
-        x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # 将 x2 重新形状为 (b * 组数, c // 组数, 高度 * 宽度)
-        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))  # 对 x2 进行池化、形状变换、并应用 softmax
-        x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # 将 x1 重新形状为 (b * 组数, c // 组数, 高度 * 宽度)
+        # 拆分回 L 和 W 部分
+        x_cat_conv_split_l, x_cat_conv_split_w = x_cat_conv_relu.split([L, W],dim=4)
 
-        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w,l)  # 计算权重
-        return (group_x * weights.sigmoid()).reshape(b, c, h, w, l)  # 应用权重并将形状恢复为原始大小
+        x_cat_conv_split_l = x_cat_conv_split_l.permute(0, 1, 2, 4, 3)  # 恢复形状: (batch, C, H, 1, L)
+        x_cat_conv_split_w = x_cat_conv_split_w                         #          (batch, C, H, 1, W)
+
+        # 生成注意力权重
+        s_l = self.sigmoid_l(self.F_l(x_cat_conv_split_l))  # 形状: (batch, C, H, 1, L)
+        s_w = self.sigmoid_w(self.F_w(x_cat_conv_split_w))  # 形状: (batch, C, H, 1, W)
+
+        # 扩展权重并应用
+        out = x * s_l.expand_as(x) * s_w.expand_as(x)
+        return out
 
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
@@ -83,10 +92,9 @@ class Down(nn.Module):
             nn.MaxPool3d(2),
             DoubleConv(in_channels, out_channels)
         )
-        self.EMA3D = EMA3D(in_channels)
 
     def forward(self, x):
-        return self.maxpool_conv(self.EMA3D(x))
+        return self.maxpool_conv(x)
 
 
 class Up(nn.Module):
@@ -96,9 +104,9 @@ class Up(nn.Module):
         self.up = nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=True)
         self.conv = DoubleConv(in_channels, out_channels)
         # 加入CA模块
-        self.EMA3D = EMA3D(out_channels)
+        self.CA_Block_3D = CA_Block_3D(out_channels)
     def forward(self, x1, x2):
-        x1 = self.up( x1 )
+        x1 = self.up(x1)
         diffZ = x2.size()[2] - x1.size()[2]
         diffY = x2.size()[3] - x1.size()[3]
         diffX = x2.size()[4] - x1.size()[4]
@@ -107,7 +115,7 @@ class Up(nn.Module):
                                     diffZ // 2, diffZ - diffZ // 2])
         x = torch.cat([x2, x1], dim=1)
 
-        return self.EMA3D(self.conv(x))
+        return  self.CA_Block_3D(self.conv(x))
 
 
 class OutConv(nn.Module):
@@ -158,13 +166,107 @@ if __name__ == '__main__':
     net = FaultSeg3D(1, 2).to(device)
     summary(net, input_size=(1, 128, 128, 128))
 
+# D:\Users\28695\anaconda3\envs\Fault\python.exe D:\WorkSpace\Code\Python\FaultSeg3D_pytorch-main\models\CA_Unet3D_A.py
+# ----------------------------------------------------------------
+#         Layer (type)               Output Shape         Param #
 # ================================================================
-# Total params: 1,462,242
-# Trainable params: 1,462,242
+#             Conv3d-1    [-1, 16, 128, 128, 128]             448
+#        BatchNorm3d-2    [-1, 16, 128, 128, 128]              32
+#               ReLU-3    [-1, 16, 128, 128, 128]               0
+#             Conv3d-4    [-1, 16, 128, 128, 128]           6,928
+#        BatchNorm3d-5    [-1, 16, 128, 128, 128]              32
+#               ReLU-6    [-1, 16, 128, 128, 128]               0
+#         DoubleConv-7    [-1, 16, 128, 128, 128]               0
+#          MaxPool3d-8       [-1, 16, 64, 64, 64]               0
+#             Conv3d-9       [-1, 32, 64, 64, 64]          13,856
+#       BatchNorm3d-10       [-1, 32, 64, 64, 64]              64
+#              ReLU-11       [-1, 32, 64, 64, 64]               0
+#            Conv3d-12       [-1, 32, 64, 64, 64]          27,680
+#       BatchNorm3d-13       [-1, 32, 64, 64, 64]              64
+#              ReLU-14       [-1, 32, 64, 64, 64]               0
+#        DoubleConv-15       [-1, 32, 64, 64, 64]               0
+#              Down-16       [-1, 32, 64, 64, 64]               0
+#         MaxPool3d-17       [-1, 32, 32, 32, 32]               0
+#            Conv3d-18       [-1, 64, 32, 32, 32]          55,360
+#       BatchNorm3d-19       [-1, 64, 32, 32, 32]             128
+#              ReLU-20       [-1, 64, 32, 32, 32]               0
+#            Conv3d-21       [-1, 64, 32, 32, 32]         110,656
+#       BatchNorm3d-22       [-1, 64, 32, 32, 32]             128
+#              ReLU-23       [-1, 64, 32, 32, 32]               0
+#        DoubleConv-24       [-1, 64, 32, 32, 32]               0
+#              Down-25       [-1, 64, 32, 32, 32]               0
+#         MaxPool3d-26       [-1, 64, 16, 16, 16]               0
+#            Conv3d-27      [-1, 128, 16, 16, 16]         221,312
+#       BatchNorm3d-28      [-1, 128, 16, 16, 16]             256
+#              ReLU-29      [-1, 128, 16, 16, 16]               0
+#            Conv3d-30      [-1, 128, 16, 16, 16]         442,496
+#       BatchNorm3d-31      [-1, 128, 16, 16, 16]             256
+#              ReLU-32      [-1, 128, 16, 16, 16]               0
+#        DoubleConv-33      [-1, 128, 16, 16, 16]               0
+#              Down-34      [-1, 128, 16, 16, 16]               0
+#          Upsample-35      [-1, 128, 32, 32, 32]               0
+#            Conv3d-36       [-1, 64, 32, 32, 32]         331,840
+#       BatchNorm3d-37       [-1, 64, 32, 32, 32]             128
+#              ReLU-38       [-1, 64, 32, 32, 32]               0
+#            Conv3d-39       [-1, 64, 32, 32, 32]         110,656
+#       BatchNorm3d-40       [-1, 64, 32, 32, 32]             128
+#              ReLU-41       [-1, 64, 32, 32, 32]               0
+#        DoubleConv-42       [-1, 64, 32, 32, 32]               0
+#            Conv3d-43         [-1, 4, 32, 1, 64]             256
+#       BatchNorm3d-44         [-1, 4, 32, 1, 64]               8
+#              ReLU-45         [-1, 4, 32, 1, 64]               0
+#            Conv3d-46        [-1, 64, 32, 32, 1]             256
+#           Sigmoid-47        [-1, 64, 32, 32, 1]               0
+#            Conv3d-48        [-1, 64, 32, 1, 32]             256
+#           Sigmoid-49        [-1, 64, 32, 1, 32]               0
+#       CA_Block_3D-50       [-1, 64, 32, 32, 32]               0
+#                Up-51       [-1, 64, 32, 32, 32]               0
+#          Upsample-52       [-1, 64, 64, 64, 64]               0
+#            Conv3d-53       [-1, 32, 64, 64, 64]          82,976
+#       BatchNorm3d-54       [-1, 32, 64, 64, 64]              64
+#              ReLU-55       [-1, 32, 64, 64, 64]               0
+#            Conv3d-56       [-1, 32, 64, 64, 64]          27,680
+#       BatchNorm3d-57       [-1, 32, 64, 64, 64]              64
+#              ReLU-58       [-1, 32, 64, 64, 64]               0
+#        DoubleConv-59       [-1, 32, 64, 64, 64]               0
+#            Conv3d-60        [-1, 2, 64, 1, 128]              64
+#       BatchNorm3d-61        [-1, 2, 64, 1, 128]               4
+#              ReLU-62        [-1, 2, 64, 1, 128]               0
+#            Conv3d-63        [-1, 32, 64, 64, 1]              64
+#           Sigmoid-64        [-1, 32, 64, 64, 1]               0
+#            Conv3d-65        [-1, 32, 64, 1, 64]              64
+#           Sigmoid-66        [-1, 32, 64, 1, 64]               0
+#       CA_Block_3D-67       [-1, 32, 64, 64, 64]               0
+#                Up-68       [-1, 32, 64, 64, 64]               0
+#          Upsample-69    [-1, 32, 128, 128, 128]               0
+#            Conv3d-70    [-1, 16, 128, 128, 128]          20,752
+#       BatchNorm3d-71    [-1, 16, 128, 128, 128]              32
+#              ReLU-72    [-1, 16, 128, 128, 128]               0
+#            Conv3d-73    [-1, 16, 128, 128, 128]           6,928
+#       BatchNorm3d-74    [-1, 16, 128, 128, 128]              32
+#              ReLU-75    [-1, 16, 128, 128, 128]               0
+#        DoubleConv-76    [-1, 16, 128, 128, 128]               0
+#            Conv3d-77       [-1, 1, 128, 1, 256]              16
+#       BatchNorm3d-78       [-1, 1, 128, 1, 256]               2
+#              ReLU-79       [-1, 1, 128, 1, 256]               0
+#            Conv3d-80      [-1, 16, 128, 128, 1]              16
+#           Sigmoid-81      [-1, 16, 128, 128, 1]               0
+#            Conv3d-82      [-1, 16, 128, 1, 128]              16
+#           Sigmoid-83      [-1, 16, 128, 1, 128]               0
+#       CA_Block_3D-84    [-1, 16, 128, 128, 128]               0
+#                Up-85    [-1, 16, 128, 128, 128]               0
+#            Conv3d-86     [-1, 2, 128, 128, 128]              34
+#           OutConv-87     [-1, 2, 128, 128, 128]               0
+#           Softmax-88     [-1, 2, 128, 128, 128]               0
+# ================================================================
+# Total params: 1,462,032
+# Trainable params: 1,462,032
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 6720.63
+# Forward/backward pass size (MB): 6313.31
 # Params size (MB): 5.58
-# Estimated Total Size (MB): 6734.20
+# Estimated Total Size (MB): 6326.89
 # ----------------------------------------------------------------
+#
+# 进程已结束，退出代码为 0
