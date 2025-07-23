@@ -63,6 +63,60 @@ class Up(nn.Module):
         return self.conv(x)
 
 
+class EndMerge(nn.Module):
+    """融合多层特征的模块（支持3D）"""
+    def __init__(self, in_channels, out_channels, scale_factors=None):
+        """
+        Args:
+            in_channels: 输入总通道数（所有特征图通道之和）
+            out_channels: 输出通道数
+            scale_factors: 各层相对于目标层的缩放因子列表
+        """
+        super().__init__()
+
+        # 默认缩放因子（假设4层结构）
+        self.scale_factors = scale_factors or [8, 4, 2, 1]
+
+        # 创建对应的上采样层
+        self.upsamplers = nn.ModuleList([
+            nn.Upsample(scale_factor=sf, mode='trilinear', align_corners=True)
+            for sf in self.scale_factors
+        ])
+
+        # 最后的卷积处理
+        self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, *features):
+        """
+        融合多层特征图
+        Args:
+            features: 按分辨率从低到高排列的特征图列表
+                      [最低分辨率特征, ..., 最高分辨率特征]
+        Returns:
+            融合后的特征图
+        """
+        # 确定目标尺寸（最高分辨率特征图的尺寸）
+        target_size = features[-1].shape[2:]
+
+        # 上采样所有特征图到目标尺寸
+        upsampled_features = []
+        for i, (feat, upsample) in enumerate(zip(features, self.upsamplers)):
+            # 直接上采样到目标尺寸
+            if feat.shape[2:] != target_size:
+                feat = F.interpolate(
+                    feat,
+                    size=target_size,
+                    mode='trilinear',
+                    align_corners=True
+                )
+            upsampled_features.append(feat)
+
+        # 沿通道维度拼接所有特征图
+        x = torch.cat(upsampled_features, dim=1)
+
+        # 通过卷积层融合特征
+        return self.conv(x)
+
 class OutConv(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(OutConv, self).__init__()
@@ -86,21 +140,21 @@ class FaultSeg3D(nn.Module):
         self.up2 = Up(192, 64)
         self.up3 = Up(96, 32)
         self.up4 = Up(48, 16)
-        self.outc = OutConv(16, n_classes)
+        self.outc = EndMerge(16+32+64+128, n_classes)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
         # encoder部分
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
+        x00 = self.inc(x)
+        x01 = self.down1(x00)
+        x02 = self.down2(x01)
+        x30 = self.down3(x02)
 
         # decoder部分
-        x = self.up2(x4, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
-        logits = self.outc(x)
+        x21 = self.up2(x30, x02)
+        x11 = self.up3(x21, x01)
+        x01 = self.up4(x11, x00)
+        logits = self.outc(x30,x21,x11,x01)
         outputs = self.softmax(logits)
         return outputs
 
@@ -112,12 +166,12 @@ if __name__ == '__main__':
     summary(net, input_size=(1, 128, 128, 128))
 
 # ================================================================
-# Total params: 1,461,010
-# Trainable params: 1,461,010
+# Total params: 1,474,056
+# Trainable params: 1,474,056
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 5962.00
-# Params size (MB): 5.57
-# Estimated Total Size (MB): 5975.57
+# Forward/backward pass size (MB): 6154.00
+# Params size (MB): 5.62
+# Estimated Total Size (MB): 6167.62
 # ----------------------------------------------------------------
