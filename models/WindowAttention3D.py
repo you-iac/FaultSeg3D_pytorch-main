@@ -55,6 +55,9 @@ class SwinSkipConnection(nn.Module):
             norm_layer=None,  # 不使用归一化
             spatial_dims=3
         )
+        #使用通道数来控制窗口大小，通道数与特征大小有关，16->128 32->64 64->32
+        window_size = (in_channels/8, in_channels/4, in_channels/4)
+
         # Swin Transformer 基础层，不做降采样，以保持空间尺寸
         self.swin_layer = BasicLayer(
             dim=in_channels,
