@@ -93,3 +93,28 @@ if __name__ == '__main__':
     # 使用 5D 张量输入，修正 input_size 参数
     summary(net, input_size=(16, 128, 128, 128))  # 这里的 (16, 128, 128, 128) 是 (C, D, H, W)
 
+# C:\ProgramData\Anaconda3\envs\Fault\python.exe D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py
+# Traceback (most recent call last):
+#   File "D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py", line 94, in <module>
+#     summary(net, input_size=(16, 128, 128, 128))  # 这里的 (16, 128, 128, 128) 是 (C, D, H, W)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torchsummary\torchsummary.py", line 72, in summary
+#     model(*x)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1051, in _call_impl
+#     return forward_call(*input, **kwargs)
+#   File "D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py", line 84, in forward
+#     x = self.swin_layer(x)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
+#     result = forward_call(*input, **kwargs)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 876, in forward
+#     x = blk(x, attn_mask)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
+#     result = forward_call(*input, **kwargs)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 670, in forward
+#     x = self.forward_part1(x, mask_matrix)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 608, in forward_part1
+#     attn_windows = self.attn(x_windows, mask=attn_mask)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
+#     result = forward_call(*input, **kwargs)
+#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 497, in forward
+#     attn = attn + relative_position_bias.unsqueeze(0)
+# RuntimeError: CUDA out of memory. Tried to allocate 16.00 GiB (GPU 0; 23.99 GiB total capacity; 20.53 GiB already allocated; 0 bytes free; 21.02 GiB reserved in total by PyTorch)
