@@ -37,7 +37,7 @@ class SwinSkipConnection(nn.Module):
     def __init__(
             self,
             in_channels: int,
-            window_size=(4, 8, 8),
+            window_size=(2, 4, 4),
             depth: int = 2,
             num_heads: int = 4,
             mlp_ratio: float = 4.0,
@@ -93,28 +93,49 @@ if __name__ == '__main__':
     # 使用 5D 张量输入，修正 input_size 参数
     summary(net, input_size=(16, 128, 128, 128))  # 这里的 (16, 128, 128, 128) 是 (C, D, H, W)
 
-# C:\ProgramData\Anaconda3\envs\Fault\python.exe D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py
-# Traceback (most recent call last):
-#   File "D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py", line 94, in <module>
-#     summary(net, input_size=(16, 128, 128, 128))  # 这里的 (16, 128, 128, 128) 是 (C, D, H, W)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torchsummary\torchsummary.py", line 72, in summary
-#     model(*x)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1051, in _call_impl
-#     return forward_call(*input, **kwargs)
-#   File "D:\Ccc\FaultSeg3D_pytorch-main\models\WindowAttention3D.py", line 84, in forward
-#     x = self.swin_layer(x)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
-#     result = forward_call(*input, **kwargs)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 876, in forward
-#     x = blk(x, attn_mask)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
-#     result = forward_call(*input, **kwargs)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 670, in forward
-#     x = self.forward_part1(x, mask_matrix)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 608, in forward_part1
-#     attn_windows = self.attn(x_windows, mask=attn_mask)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torch\nn\modules\module.py", line 1071, in _call_impl
-#     result = forward_call(*input, **kwargs)
-#   File "C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\monai\networks\nets\swin_unetr.py", line 497, in forward
-#     attn = attn + relative_position_bias.unsqueeze(0)
-# RuntimeError: CUDA out of memory. Tried to allocate 16.00 GiB (GPU 0; 23.99 GiB total capacity; 20.53 GiB already allocated; 0 bytes free; 21.02 GiB reserved in total by PyTorch)
+
+# 窗口大小：(2,4,4) 16 128 128 128
+# ================================================================
+# Total params: 6,832
+# Trainable params: 6,832
+# Non-trainable params: 0
+# ----------------------------------------------------------------
+# Input size (MB): 128.00
+# Forward/backward pass size (MB): 11008.17
+# Params size (MB): 0.03
+# Estimated Total Size (MB): 11136.20
+# ----------------------------------------------------------------
+
+# 窗口大小：(4,8,8) 32 64 64 64
+# ================================================================
+# Total params: 26,464
+# Trainable params: 26,464
+# Non-trainable params: 0
+# ----------------------------------------------------------------
+# Input size (MB): 32.00
+# Forward/backward pass size (MB): 2760.75
+# Params size (MB): 0.10
+# Estimated Total Size (MB): 2792.85
+# ----------------------------------------------------------------
+
+
+# (4, 8, 8) (64, 32, 32, 32))
+# ----------------------------------------------------------------
+# Input size (MB): 8.00
+# Forward/backward pass size (MB): 697.50
+# Params size (MB): 0.40
+# Estimated Total Size (MB): 705.90
+# ----------------------------------------------------------------
+
+# (8, 16, 16) (64, 32, 32, 32))
+# ----------------------------------------------------------------
+# Input size (MB): 8.00
+# Forward/backward pass size (MB): 1212.00
+# Params size (MB): 0.40
+# Estimated Total Size (MB): 1220.40
+# ----------------------------------------------------------------
+
+
+
+
+
