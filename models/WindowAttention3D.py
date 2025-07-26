@@ -24,6 +24,9 @@ import torch.nn as nn
 from monai.networks.blocks import PatchEmbed
 from monai.networks.nets.swin_unetr import BasicLayer
 
+# pip install monai
+# pip install einops
+
 
 class SwinSkipConnection(nn.Module):
     """
