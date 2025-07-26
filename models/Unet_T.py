@@ -3,8 +3,7 @@ from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
 
-#conda pip install einops
-
+from WindowAttention3D import SwinSkipConnection
 
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
@@ -71,61 +70,6 @@ from monai.networks.blocks import PatchEmbed
 from monai.networks.nets.swin_unetr import BasicLayer
 
 
-class SwinSkipConnection(nn.Module):
-    """
-    通用SwinTransformer3D跳跃连接模块。
-    输入输出形状均为 (B, C, D, H, W)，空间尺寸与通道数保持一致。
-    """
-
-    def __init__(
-            self,
-            in_channels: int,
-            window_size=(4, 8, 8),
-            depth: int = 2,
-            num_heads: int = 4,
-            mlp_ratio: float = 4.0,
-            qkv_bias: bool = True,
-            dropout: float = 0.0,
-            attn_dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.in_channels = in_channels
-        # 1x1x1 patch embedding 保留输入空间大小
-        self.patch_embed = PatchEmbed(
-            patch_size=(1, 1, 1),
-            in_chans=in_channels,
-            embed_dim=in_channels,
-            norm_layer=None,  # 不使用归一化
-            spatial_dims=3
-        )
-        # Swin Transformer 基础层，不做降采样，以保持空间尺寸
-        self.swin_layer = BasicLayer(
-            dim=in_channels,
-            depth=depth,
-            num_heads=num_heads,
-            window_size=window_size,
-            drop_path=[0.0] * depth,  # 可使用线性递增的 drop_path
-            mlp_ratio=mlp_ratio,
-            qkv_bias=qkv_bias,
-            drop=dropout,
-            attn_drop=attn_dropout,
-            norm_layer=nn.LayerNorm,
-            downsample=None,  # 关闭下采样，保持尺寸不变:contentReference[oaicite:10]{index=10}
-        )
-
-    def forward(self, x):
-        # 输入验证：应为 (B, C, D, H, W) 的5维张量
-        if x.ndim != 5:
-            raise ValueError(f"Expected 5D tensor, got shape {tuple(x.shape)}")
-        if x.shape[1] != self.in_channels:
-            raise ValueError(
-                f"Expected {self.in_channels} channels, got {x.shape[1]}"
-            )
-        # Patch嵌入（1x1卷积）：输出形状 (B, C, D, H, W):contentReference[oaicite:11]{index=11}
-        x = self.patch_embed(x)
-        # SwinTransformer BasicLayer：输出形状 (B, C, D, H, W):contentReference[oaicite:12]{index=12}
-        x = self.swin_layer(x)
-        return x
 
 class FaultSeg3D(nn.Module):
     def __init__(self, n_channels, n_classes):
@@ -167,12 +111,14 @@ if __name__ == '__main__':
     summary(net, input_size=(1, 128, 128, 128))
 
 # ================================================================
-# Total params: 1,461,010
-# Trainable params: 1,461,010
+# Total params: 1,598,434
+# Trainable params: 1,598,434
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 5962.00
-# Params size (MB): 5.57
-# Estimated Total Size (MB): 5975.57
+# Forward/backward pass size (MB): 11986.29
+# Params size (MB): 6.10
+# Estimated Total Size (MB): 12000.39
 # ----------------------------------------------------------------
+# C:\ProgramData\Anaconda3\envs\Fault\lib\site-packages\torchsummary\torchsummary.py:93: RuntimeWarning: overflow encountered in long_scalars
+#   total_output += np.prod(summary[layer]["output_shape"])
