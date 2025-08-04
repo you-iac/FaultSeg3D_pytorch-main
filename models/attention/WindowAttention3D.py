@@ -37,7 +37,7 @@ class SwinSkipConnection(nn.Module):
     def __init__(
             self,
             in_channels: int,
-            window_size=(2, 4, 4),
+            window_size=(4, 4, 4),
             depth: int = 2,
             num_heads: int = 4,
             mlp_ratio: float = 4.0,
