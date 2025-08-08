@@ -79,3 +79,28 @@ if __name__ == "__main__":
 # python main.py --mode pred --exp  ***  --pred_data_name *** --pred_path D:/data/***
 # 验证
 # python main.py --mode valid_only --exp ***
+
+
+
+# valid loss:	0.361565550416708
+# valid iou:	0.7892225321753248
+# valid dice:	0.8720652314570909
+
+# 损失函数
+# valid loss:	0.5467045091092586
+# valid iou:	0.8509732605697133
+# valid dice:	0.914122573012089
+
+# CA 跳跃连接
+# valid loss:	0.5347332391887903
+# valid iou:	0.8499133697539666
+# valid dice:	0.9135304354586736
+
+# Unet
+# valid loss:	0.5264931969344616
+# valid iou:	0.8565751354414219
+# valid dice:	0.9178771569514355
+
+
+
+
