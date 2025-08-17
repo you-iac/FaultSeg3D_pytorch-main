@@ -2,7 +2,7 @@
 # 输入输出保持大小一致一致为B C L H W，
 # 最大输入为 2 16 128 128 128 ,最小为2 128 16 16 16。实现这个模块
 
-
+from torchsummary import summary
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,10 +83,13 @@ class UNet3DWithTransformer(nn.Module):
 if __name__ == '__main__':
 
     # 创建模型实例
-    model = UNet3DWithTransformer(in_channels=64, out_channels=32, num_heads=8, num_layers=4)
+    # model = UNet3DWithTransformer(in_channels=64, out_channels=32, num_heads=8, num_layers=4)
+    #
+    # # 测试模型
+    # input_tensor = torch.randn(2, 64, 16, 16, 16)  # 2 samples, 16 channels, 128x128x128
+    # output_tensor = model(input_tensor)
 
-    # 测试模型
-    input_tensor = torch.randn(2, 64, 16, 16, 16)  # 2 samples, 16 channels, 128x128x128
-    output_tensor = model(input_tensor)
-
-    print(f"Output shape: {output_tensor.shape}")  # 应该输出 [2, 1, 128, 128, 128]
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = UNet3DWithTransformer(1, 2).to(device)
+    summary(net, input_size=(1, 128, 128, 128))
+    # print(f"Output shape: {output_tensor.shape}")  # 应该输出 [2, 1, 128, 128, 128]

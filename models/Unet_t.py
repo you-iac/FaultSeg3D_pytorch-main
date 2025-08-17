@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Transformer
 
-#加入上采样的多尺度融合
+#注意力机制加到最下一层
 
 #   x_00 -----------------> 16 128^3 ----------------> x_01
 #
