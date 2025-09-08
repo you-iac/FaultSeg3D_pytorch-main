@@ -158,10 +158,8 @@ if __name__ == '__main__':
     net = FaultSeg3D(1, 2).to(device)
     summary(net, input_size=(1, 128, 128, 128))
 
-# ================================================================
-# Total params: 1,462,242
-# Trainable params: 1,462,242
-# Non-trainable params: 0
+
+
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
 # Forward/backward pass size (MB): 6720.63
