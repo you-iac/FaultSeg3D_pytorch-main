@@ -3,7 +3,17 @@ from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
 
+#加入上采样的多尺度融合
 
+#   x_00 -----------------> 16 128^3 ----------------> x_01
+#
+#           x_10 ---------> 32  64^3 --------> x_11
+#
+#                   x_20 -> 64  32^3 -> x_21
+#
+#                           x_30
+#
+#
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
