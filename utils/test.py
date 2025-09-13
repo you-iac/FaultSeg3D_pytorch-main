@@ -7,6 +7,21 @@ from tqdm import tqdm
 from scipy.ndimage import gaussian_filter
 
 
+def normalization(data):
+    _range = np.max(data) - np.min(data)
+    return (data - np.min(data)) / _range
+
+
+def normalization_tensor(data):
+    _range = torch.max(data) - torch.min(data)
+    return (data - torch.min(data)) / _range
+
+
+def z_score(data):
+    return (data - np.mean(data)) / np.std(data)
+
+
+
 def sliding_window_prediction(input_data, block_size, overlap, model, args):
     # 输入数据的尺寸
     input_shape = input_data.shape
@@ -103,3 +118,56 @@ def pred_Gaussian(args):
 
     save_pred_picture(input_data, output_data, save_path + '/picture/', args.pred_data_name)
     print("Finish!!!")
+
+
+
+def prediction_all(args):
+    print("============================== pred_Gaussian ==============================")
+    input_data = load_pred_data(args)
+
+    #加载模型
+    model = FaultSeg3D(args.in_channels, args.out_channels).to(args.device)
+    model_path = './EXP/' + args.exp + '/models/' + args.pretrained_model_name
+    model.load_state_dict(torch.load(model_path))
+
+    print("Loaded model from disk")
+
+    output_data = prediction(model,input_data,args.device)
+
+    threshold = args.threshold
+    output_data[output_data > threshold] = 1
+    output_data[output_data <= threshold] = 0
+
+    print("---Start Save results  ······")
+    save_path = './EXP/' + args.exp + '/results/pred/' + args.pred_data_name + '/'
+    if not os.path.exists(save_path + '/numpy/'):
+        os.makedirs(save_path + '/numpy/')
+    if not os.path.exists(save_path + '/picture/'):
+        os.makedirs(save_path + '/picture/')
+    np.save(save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy', output_data)
+
+    save_pred_picture(input_data, output_data, save_path + '/picture/', args.pred_data_name)
+    print("Finish!!!")
+
+
+
+def prediction(model, data, device):
+    model.eval()
+    data = normalization(data)
+    m1, m2, m3 = data.shape
+    c1 = (np.ceil(m1 / 16) * 16).astype(np.int)
+    c2 = (np.ceil(m2 / 16) * 16).astype(np.int)
+    c3 = (np.ceil(m3 / 16) * 16).astype(np.int)
+    input_tensor = np.zeros((c1, c2, c3), dtype=np.float32) + 0.5
+    input_tensor[:m1, :m2, :m3] = data
+    input_tensor = torch.from_numpy(input_tensor)[None, None, :, :, :].to(device)
+    if device == 'cpu':
+        input_tensor = input_tensor.float()
+    else:
+        input_tensor = input_tensor.float()
+    with torch.no_grad():
+        result = model(input_tensor).cpu().numpy()[0, 0, :m1, :m2, :m3]
+    return result
+
+
+

@@ -9,7 +9,10 @@ from torch import nn
 from models.faultseg3d import FaultSeg3D
 from utils.train import train, valid
 from utils.test import pred_Gaussian
+from utils.test import prediction_all
+
 from utils.tools import save_args_info
+
 
 
 def add_args():
@@ -17,7 +20,7 @@ def add_args():
 
     parser.add_argument("--exp", default="test", type=str, help="Name of each run")
     parser.add_argument("--device", default='cuda:0', type=str, help="GPU id for training")
-    parser.add_argument("--mode", default='train', choices=['train', 'valid_only', 'pred'], type=str, help='network run mode')
+    parser.add_argument("--mode", default='train', choices=['train', 'valid_only', 'pred', 'pred_all'], type=str, help='network run mode')
     parser.add_argument("--batch_size", default=2, type=int, help="number of batch size")
     parser.add_argument("--batch_size_not_train", default=1, type=int, help="number of batch size when not training")
     parser.add_argument("--epochs", default=25, type=int, help="max number of training epochs")
@@ -62,6 +65,8 @@ def main(args):
         valid(args)
     elif args.mode == 'pred':
         pred_Gaussian(args)
+    elif args.mode == 'pred_all':
+        prediction_all(args)
     else:
         raise ValueError("Only ['train', 'valid_only', 'pred'] mode is supported.")
     save_args_info(args)
