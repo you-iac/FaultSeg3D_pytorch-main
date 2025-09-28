@@ -153,7 +153,7 @@ def save_train_info(args, train_RESULT, val_RESULT):
     data_df.index = np.arange(0, args.epochs, 1)
     writer = pd.ExcelWriter('./EXP/' + args.exp + '/results/train/train_result.xlsx')
     data_df.to_excel(writer, 'page_1', float_format='%.5f')
-    writer.save()
+    writer._save()
     writer.close()
 
     data_df_val = pd.DataFrame(val_RESULT)
@@ -161,7 +161,7 @@ def save_train_info(args, train_RESULT, val_RESULT):
     data_df_val.index = np.arange(0, args.epochs, 1)
     writer_val = pd.ExcelWriter('./EXP/' + args.exp + '/results/train/val_result.xlsx')
     data_df_val.to_excel(writer_val, 'page_1', float_format='%.5f')
-    writer_val.save()
+    writer_val._save()
 
 
 def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
