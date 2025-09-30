@@ -77,7 +77,7 @@ if __name__ == "__main__":
 
     main(args)
 
-# 训练
+# 训练 python main.py --mode train --exp test  --train_path ./data/train/ --valid_path ./data/valid/ --epochs 50 --loss_func dice_plus_ce --batch_size 2
 # python main.py --mode train --exp *** --train_path ./data/train/ --valid_path ./data/valid/ --epochs 50
 # python main.py --mode train --exp *** --train_path ./data/data_3D_800/train/ --valid_path ./data/data_3D_800/valid/ --epochs 50
 # 预测
