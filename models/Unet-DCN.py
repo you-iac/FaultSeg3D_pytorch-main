@@ -2,9 +2,98 @@ import torch
 from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
-
+import sys
 # 导入 tvdcn 包中的 PackedDeformConv3d
-from tvdcn.ops import PackedDeformConv3d
+import torch
+
+from tvdcn.ops import deform_conv3d
+
+
+class DoubleDeformConv(nn.Module):
+
+    def __init__(self, in_channels, out_channels, mid_channels=None):
+        super(DoubleDeformConv, self).__init__()
+        if mid_channels is None:
+            mid_channels = out_channels
+
+        kernel_size = 3
+        padding = 1
+        num_points = kernel_size * kernel_size * kernel_size  # 3*3*3 = 27
+        offset_mask_channels = 4 * num_points  # 3*K^3 (offset) + 1*K^3 (mask) = 108
+
+        # --- 第一层可变形卷积的组件：in_channels -> mid_channels ---
+
+        # 1. 预测 Offset 和 Mask 的辅助 Conv3D
+        self.offset_mask_conv1 = nn.Conv3d(
+            in_channels, offset_mask_channels, kernel_size=kernel_size, padding=padding
+        )
+
+        # 2. 学习可变形卷积的权重 (作为 DeformConv3d 的 weight 参数)
+        # 权重形状: (Out_C, In_C, K, K, K) = (mid_channels, in_channels, 3, 3, 3)
+        self.weight1 = nn.Parameter(torch.Tensor(mid_channels, in_channels,
+                                                 kernel_size, kernel_size, kernel_size))
+        self.bias1 = nn.Parameter(torch.Tensor(mid_channels))
+
+        nn.init.kaiming_uniform_(self.weight1, a=5)
+        self.bias1.data.zero_()
+
+        self.bn1 = nn.BatchNorm3d(mid_channels)
+
+        # --- 第二层可变形卷积的组件：mid_channels -> out_channels ---
+
+        # 1. 预测 Offset 和 Mask 的辅助 Conv3D
+        # 输入通道: mid_channels (上一层的输出)
+        self.offset_mask_conv2 = nn.Conv3d(
+            mid_channels, offset_mask_channels, kernel_size=kernel_size, padding=padding
+        )
+
+        # 2. 学习可变形卷积的权重 (作为 DeformConv3d 的 weight 参数)
+        # 权重形状: (Out_C, In_C, K, K, K) = (out_channels, mid_channels, 3, 3, 3)
+        self.weight2 = nn.Parameter(torch.Tensor(out_channels, mid_channels,
+                                                 kernel_size, kernel_size, kernel_size))
+        self.bias2 = nn.Parameter(torch.Tensor(out_channels))
+
+        nn.init.kaiming_uniform_(self.weight2, a=5)
+        self.bias2.data.zero_()
+
+        self.bn2 = nn.BatchNorm3d(out_channels)
+
+    def forward(self, x):
+        num_points = 27
+
+        # --- 第一层可变形卷积 ---
+
+        # 1. 生成 offset (3*K^3) 和 mask (1*K^3)
+        offset_mask1 = self.offset_mask_conv1(x)
+        offset1 = offset_mask1[:, :3 * num_points, :, :, :]
+        mask1 = torch.sigmoid(offset_mask1[:, 3 * num_points:, :, :, :])
+
+        # 2. 执行可变形卷积
+        x = deform_conv3d(
+            x, self.weight1, offset1, mask1, self.bias1,
+            stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1), groups=1
+        )
+
+        x = self.bn1(x)
+        x = F.relu(x, inplace=True)
+
+        # --- 第二层可变形卷积 ---
+
+        # 1. 生成 offset 和 mask
+        offset_mask2 = self.offset_mask_conv2(x)
+        offset2 = offset_mask2[:, :3 * num_points, :, :, :]
+        mask2 = torch.sigmoid(offset_mask2[:, 3 * num_points:, :, :, :])
+
+        # 2. 执行可变形卷积
+        x = deform_conv3d(
+            x, self.weight2, offset2, mask2, self.bias2,
+            stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1), groups=1
+        )
+
+        x = self.bn2(x)
+        x = F.relu(x, inplace=True)
+
+        return x
 
 
 class DoubleConv(nn.Module):
@@ -16,14 +105,7 @@ class DoubleConv(nn.Module):
 
         if use_deformable:
             # 使用 tvdcn.ops.PackedDeformConv3d 替换 nn.Conv3d
-            self.double_conv = nn.Sequential(
-                PackedDeformConv3d(in_channels, mid_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(mid_channels),
-                nn.ReLU(inplace=True),
-                PackedDeformConv3d(mid_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(out_channels),
-                nn.ReLU(inplace=True)
-            )
+            self.double_conv = DoubleDeformConv(in_channels, out_channels, mid_channels)
         else:
             self.double_conv = nn.Sequential(
                 nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
@@ -85,7 +167,7 @@ class FaultSeg3D(nn.Module):
         self.n_classes = n_classes
 
         # 第一和第二层使用可变形卷积
-        self.inc = DoubleConv(n_channels, 16, use_deformable=True)
+        self.inc = DoubleConv(n_channels, 16)
         self.down1 = Down(16, 32, use_deformable=True)
 
         # 剩下的层使用普通卷积
@@ -121,12 +203,12 @@ if __name__ == '__main__':
     summary(net, input_size=(1, 128, 128, 128))
 
 # ================================================================
-# Total params: 1,603,165
-# Trainable params: 1,603,165
+# Total params: 1,559,658
+# Trainable params: 1,559,658
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 8878.00
-# Params size (MB): 6.12
-# Estimated Total Size (MB): 8892.12
+# Forward/backward pass size (MB): 6202.00
+# Params size (MB): 5.95
+# Estimated Total Size (MB): 6215.95
 # ----------------------------------------------------------------
