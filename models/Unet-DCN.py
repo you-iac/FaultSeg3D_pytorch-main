@@ -171,8 +171,8 @@ class FaultSeg3D(nn.Module):
         self.down1 = Down(16, 32, use_deformable=True)
 
         # 剩下的层使用普通卷积
-        self.down2 = Down(32, 64)
-        self.down3 = Down(64, 128)
+        self.down2 = Down(32, 64, use_deformable=True)
+        self.down3 = Down(64, 128, use_deformable=True)
 
         self.up2 = Up(192, 64)
         self.up3 = Up(96, 32)
