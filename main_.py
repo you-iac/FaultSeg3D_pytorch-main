@@ -18,9 +18,9 @@ from utils.tools import save_args_info
 def add_args():
     parser = argparse.ArgumentParser(description="FaultSeg3D_pytorch")
 
-    parser.add_argument("--exp", default="400_50_Unet_ant_B+D_torch2.7.1", type=str, help="Name of each run")
+    parser.add_argument("--exp", default="400_50_Unet_DCN", type=str, help="Name of each run")
     parser.add_argument("--device", default='cuda:0', type=str, help="GPU id for training")
-    parser.add_argument("--mode", default='train', choices=['train', 'valid_only', 'pred', 'pred_all'], type=str, help='network run mode')
+    parser.add_argument("--mode", default='pred', choices=['train', 'valid_only', 'pred', 'pred_all'], type=str, help='network run mode')
     parser.add_argument("--batch_size", default=4, type=int, help="number of batch size")
     parser.add_argument("--batch_size_not_train", default=1, type=int, help="number of batch size when not training")
     parser.add_argument("--epochs", default=50, type=int, help="max number of training epochs")

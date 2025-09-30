@@ -203,12 +203,12 @@ if __name__ == '__main__':
     summary(net, input_size=(1, 128, 128, 128))
 
 # ================================================================
-# Total params: 1,559,658
-# Trainable params: 1,559,658
+# Total params: 1,570,074
+# Trainable params: 1,570,074
 # Non-trainable params: 0
 # ----------------------------------------------------------------
 # Input size (MB): 8.00
-# Forward/backward pass size (MB): 6202.00
-# Params size (MB): 5.95
-# Estimated Total Size (MB): 6215.95
+# Forward/backward pass size (MB): 6202.75
+# Params size (MB): 5.99
+# Estimated Total Size (MB): 6216.74
 # ----------------------------------------------------------------
