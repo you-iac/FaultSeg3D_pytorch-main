@@ -21,12 +21,12 @@ if __name__ == '__main__':
     # z = 0
     # x = 0
     # y = 0
-
+    #
     # s = s[0 + z:768 + z, 0 + x:1088 + x, 0 + y:448 + y]
     # np.save("D:/data/PCB.npy", s)
     # print(s.shape)
 
-    s = np.load("D:/PCB.npy")
+    s = np.load("D:/data/PCB.npy")
     print(s.shape)
     #
     # s = s[0:128,:,:]
