@@ -107,6 +107,54 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
+    elif args.loss_func == 'dice_ce_plus_smooth':
+        # 1. 计算基础分割损失 (Dice + 加权CE)
+        # 假设 DiceLoss 和 CrossEntropyLoss 能够正确处理 (B, C, D, H, W) 的 3D 输入
+        criterion_dice = DiceLoss().to(args.device)
+        loss_dice = criterion_dice(outputs, labels)
+
+        # 计算权重
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        # 假设是二分类，权重为 [背景权重, 前景权重]
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+
+        # CrossEntropyLoss 的输入是 logits (outputs)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+
+        loss_seg = loss_dice + loss_ce
+
+        # 2. 计算 3D 连续性/平滑性惩罚项 (L_smooth_3D)
+
+        # 从 Logits (outputs) 中获取前景类 (C=1) 的预测概率 P
+        # 假设 outputs 形状为 (B, 2, D, H, W)，前景类是索引 1
+        probabilities = torch.sigmoid(outputs[:, 1, :, :, :])  # 形状为 (B, D, H, W)
+
+        # 惩罚项 L_smooth_3D = Sum( (P_x)^2 + (P_y)^2 + (P_z)^2 ) / N
+
+        # 计算深度 (z) 方向的梯度差 (dim=1，因为索引 0 是 Batch)
+        diff_z = torch.diff(probabilities, dim=1)
+        smooth_loss_z = torch.mean(diff_z.pow(2))
+
+        # 计算高度 (y) 方向的梯度差 (dim=2)
+        diff_y = torch.diff(probabilities, dim=2)
+        smooth_loss_y = torch.mean(diff_y.pow(2))
+
+        # 计算宽度 (x) 方向的梯度差 (dim=3)
+        diff_x = torch.diff(probabilities, dim=3)
+        smooth_loss_x = torch.mean(diff_x.pow(2))
+
+        # 3D 平滑性损失：三个方向的梯度平方均值之和
+        loss_smooth_3d = smooth_loss_x + smooth_loss_y + smooth_loss_z
+
+        # 3. 组合总损失
+        # 这里的 smooth_lambda 是关键超参数
+        smooth_lambda = getattr(args, 'smooth_lambda', 0.01)  # 默认值 0.01
+
+        total_loss = loss_seg + smooth_lambda * loss_smooth_3d
+
+        return total_loss
     else :
         raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
 
