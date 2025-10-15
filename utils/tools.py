@@ -150,7 +150,7 @@ def compute_loss(outputs, labels, args):
 
         # 3. 组合总损失
         # 这里的 smooth_lambda 是关键超参数
-        smooth_lambda = getattr(args, 'smooth_lambda', 0.0001)  # 默认值 0.01
+        smooth_lambda = getattr(args, 'smooth_lambda', 0.1)  # 默认值 0.01
 
         total_loss = loss_seg + smooth_lambda * loss_smooth_3d
 

@@ -14,8 +14,8 @@ val_every : 10
 optim_lr : 0.0001
 workers : 0
 pretrained_model_name : FaultSeg3D_BEST.pth
-pred_data_name : PCB
-pred_path : D:/data/PCB.npy
+pred_data_name : kerry
+pred_path : D:/Ccc/kerry.npy
 overlap : 0.25
 threshold : 0.5
 sigma : 0.0
