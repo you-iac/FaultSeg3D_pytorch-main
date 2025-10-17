@@ -9,7 +9,10 @@ import pandas as pd
 from matplotlib import pyplot as plt
 
 from utils.dice_loss import DiceLoss
-
+from .cldice import soft_cldice, soft_dice
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 def save_args_info(args):
     # save args to config.txt
@@ -155,6 +158,68 @@ def compute_loss(outputs, labels, args):
         total_loss = loss_seg + smooth_lambda * loss_smooth_3d
 
         return total_loss
+    if args.loss_func == 'dice_plus_cldice':
+
+        # --- 1. 硬编码超参数 ---
+        CL_ITER = 10  # 软骨架化迭代次数
+        ALPHA_CL = 0.5  # clDice 权重
+        DOWNSAMPLE_SIZE = [64, 64, 64]  # 性能优化目标分辨率 (例如 64x64x64)
+        # ----------------------
+
+        # 初始化损失函数
+        criterion_cldice = soft_cldice(iter_=CL_ITER, smooth=1.).to(args.device)
+
+        # --- 2. 数据准备 ---
+
+        y_pred = F.softmax(outputs, dim=1)
+        num_classes = outputs.size(1)
+
+        if labels.dim() == outputs.dim() - 1:
+            y_true_onehot = F.one_hot(labels.long(), num_classes=num_classes)
+            y_true_onehot = y_true_onehot.permute(0, 4, 1, 2, 3).float()
+        else:
+            y_true_onehot = labels.float()
+
+        # --- 3. 性能优化：对 clDice 的输入进行降采样 ---
+
+        # 降采样预测概率 (使用三线性插值，保持连续性)
+        y_pred_small = F.interpolate(
+            y_pred,
+            size=DOWNSAMPLE_SIZE,
+            mode='trilinear',
+            align_corners=False
+        )
+
+        # 降采样独热编码标签 (使用最近邻插值，保持 0/1 属性)
+        y_true_onehot_small = F.interpolate(
+            y_true_onehot,
+            size=DOWNSAMPLE_SIZE,
+            mode='nearest'  # 'nearest' 或 'nearest-exact' 适合离散标签
+        )
+
+        # --- 4. 计算损失 ---
+
+        # clDice 损失 (使用降采样后的张量)
+        cl_dice_similarity = criterion_cldice(y_true_onehot_small, y_pred_small)
+        loss_cldice = 1.0 - cl_dice_similarity
+        # 计算Dice Loss
+        criterion_dice = DiceLoss().to(args.device)
+        loss_dice = criterion_dice(outputs, labels)
+
+        # 计算加权交叉熵损失
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+
+        # 组合损失（可调整权重系数）
+        combined_loss = loss_dice + loss_ce  # 简单相加
+        # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
+
+        # 组合损失
+        combined_loss = (1.0 - ALPHA_CL) * combined_loss + ALPHA_CL * loss_cldice
+        return combined_loss
     else :
         raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
 
