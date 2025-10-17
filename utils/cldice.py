@@ -7,7 +7,7 @@ class soft_cldice(nn.Module):
         super(soft_cldice, self).__init__()
         self.iter = iter_
         self.smooth = smooth
-        self.soft_skeletonize = SoftSkeletonize(num_iter=10)
+        self.soft_skeletonize = SoftSkeletonize(num_iter=iter_)
         self.exclude_background = exclude_background
 
     def forward(self, y_true, y_pred):

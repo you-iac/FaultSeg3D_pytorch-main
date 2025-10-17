@@ -160,14 +160,14 @@ def compute_loss(outputs, labels, args):
         return total_loss
     if args.loss_func == 'dice_plus_cldice':
 
-        # --- 1. 硬编码超参数 ---
-        CL_ITER = 10  # 软骨架化迭代次数
+        CL_ITER = 30  # 软骨架化迭代次数
         ALPHA_CL = 0.5  # clDice 权重
         DOWNSAMPLE_SIZE = [64, 64, 64]  # 性能优化目标分辨率 (例如 64x64x64)
         # ----------------------
 
         # 初始化损失函数
         criterion_cldice = soft_cldice(iter_=CL_ITER, smooth=1.).to(args.device)
+        criterion_dice = DiceLoss().to(args.device)
 
         # --- 2. 数据准备 ---
 
@@ -202,23 +202,12 @@ def compute_loss(outputs, labels, args):
         # clDice 损失 (使用降采样后的张量)
         cl_dice_similarity = criterion_cldice(y_true_onehot_small, y_pred_small)
         loss_cldice = 1.0 - cl_dice_similarity
-        # 计算Dice Loss
-        criterion_dice = DiceLoss().to(args.device)
+
+        # Dice 损失 (通常需要全分辨率的 logits 和 labels)
         loss_dice = criterion_dice(outputs, labels)
 
-        # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
-
-        # 组合损失（可调整权重系数）
-        combined_loss = loss_dice + loss_ce  # 简单相加
-        # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
-
         # 组合损失
-        combined_loss = (1.0 - ALPHA_CL) * combined_loss + ALPHA_CL * loss_cldice
+        combined_loss = (1.0 - ALPHA_CL) * loss_dice + ALPHA_CL * loss_cldice
         return combined_loss
     else :
         raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
