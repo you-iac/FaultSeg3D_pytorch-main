@@ -10,6 +10,7 @@ from matplotlib import pyplot as plt
 
 from utils.dice_loss import DiceLoss
 from .cldice import soft_cldice, soft_dice
+from .TopologicalLoss import TopologicalLoss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -166,7 +167,7 @@ def compute_loss(outputs, labels, args):
 
         CL_ITER = getattr(args, 'cl_iter', 20)
         ALPHA_CL = getattr(args, 'alpha_cl', 0.3)
-        DOWNSAMPLE_SIZE = getattr(args, 'downsample_size', [128, 128, 128])
+        DOWNSAMPLE_SIZE = getattr(args, 'downsample_size', [64, 64, 64])
         
         # 初始化损失函数
         criterion_cldice = soft_cldice(iter_=CL_ITER, smooth=1., exclude_background=True).to(args.device)
@@ -213,8 +214,71 @@ def compute_loss(outputs, labels, args):
             print(f"Loss components - Dice: {loss_dice.item():.4f}, clDice: {loss_cldice.item():.4f}, Combined: {combined_loss.item():.4f}")
         
         return combined_loss
+    
+    elif args.loss_func == 'dice_plus_topo':
+        # 组合 Dice 损失和拓扑损失
+        criterion_dice = DiceLoss().to(args.device)
+        
+        # 拓扑损失参数
+        lambda_topo = getattr(args, 'lambda_topo', 0.1)  # 拓扑损失权重
+        dim_H0 = getattr(args, 'dim_H0', True)  # 是否使用连通性约束
+        dim_H1 = getattr(args, 'dim_H1', True)  # 是否使用孔洞约束
+        
+        criterion_topo = TopologicalLoss(
+            lambda_topo=lambda_topo, 
+            dim_H0=dim_H0, 
+            dim_H1=dim_H1
+        ).to(args.device)
+        
+        # 计算 Dice 损失
+        loss_dice = criterion_dice(outputs, labels)
+        
+        # 计算拓扑损失
+        loss_topo = criterion_topo(outputs, labels)
+        
+        # 组合损失
+        combined_loss = loss_dice + loss_topo
+        
+        # 可选：添加调试信息
+        if getattr(args, 'debug_loss', False):
+            print(f"Loss components - Dice: {loss_dice.item():.4f}, Topo: {loss_topo.item():.4f}, Combined: {combined_loss.item():.4f}")
+        
+        return combined_loss
+    
+    elif args.loss_func == 'dice_ce_topo':
+        # 组合 Dice + CE + 拓扑损失
+        criterion_dice = DiceLoss().to(args.device)
+        
+        # 计算权重
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+        
+        # 计算各种损失
+        loss_dice = criterion_dice(outputs, labels)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        
+        # 拓扑损失参数
+        lambda_topo = getattr(args, 'lambda_topo', 0.05)  # 较小的拓扑权重
+        criterion_topo = TopologicalLoss(
+            lambda_topo=lambda_topo, 
+            dim_H0=True, 
+            dim_H1=True
+        ).to(args.device)
+        
+        loss_topo = criterion_topo(outputs, labels)
+        
+        # 组合损失
+        combined_loss = loss_dice + loss_ce + loss_topo
+        
+        if getattr(args, 'debug_loss', False):
+            print(f"Loss components - Dice: {loss_dice.item():.4f}, CE: {loss_ce.item():.4f}, Topo: {loss_topo.item():.4f}, Combined: {combined_loss.item():.4f}")
+        
+        return combined_loss
+    
     else :
-        raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
+        raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce', 'dice_plus_cldice', 'dice_plus_topo', 'dice_ce_topo'] loss is supported.")
 
 
 def con_matrix(outputs, labels, args):
