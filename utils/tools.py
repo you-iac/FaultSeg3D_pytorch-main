@@ -160,17 +160,19 @@ def compute_loss(outputs, labels, args):
         return total_loss
     if args.loss_func == 'dice_plus_cldice':
 
-        CL_ITER = 30  # 软骨架化迭代次数
-        ALPHA_CL = 0.5  # clDice 权重
-        DOWNSAMPLE_SIZE = [64, 64, 64]  # 性能优化目标分辨率 (例如 64x64x64)
-        # ----------------------
+        # 快速模式：减少clDice计算开销
+        fast_mode = getattr(args, 'fast_mode', True)  # 默认启用快速模式
+        
 
+        CL_ITER = getattr(args, 'cl_iter', 20)
+        ALPHA_CL = getattr(args, 'alpha_cl', 0.3)
+        DOWNSAMPLE_SIZE = getattr(args, 'downsample_size', [128, 128, 128])
+        
         # 初始化损失函数
-        criterion_cldice = soft_cldice(iter_=CL_ITER, smooth=1.).to(args.device)
+        criterion_cldice = soft_cldice(iter_=CL_ITER, smooth=1., exclude_background=True).to(args.device)
         criterion_dice = DiceLoss().to(args.device)
 
         # --- 2. 数据准备 ---
-
         y_pred = F.softmax(outputs, dim=1)
         num_classes = outputs.size(1)
 
@@ -181,7 +183,6 @@ def compute_loss(outputs, labels, args):
             y_true_onehot = labels.float()
 
         # --- 3. 性能优化：对 clDice 的输入进行降采样 ---
-
         # 降采样预测概率 (使用三线性插值，保持连续性)
         y_pred_small = F.interpolate(
             y_pred,
@@ -194,20 +195,23 @@ def compute_loss(outputs, labels, args):
         y_true_onehot_small = F.interpolate(
             y_true_onehot,
             size=DOWNSAMPLE_SIZE,
-            mode='nearest'  # 'nearest' 或 'nearest-exact' 适合离散标签
+            mode='nearest'
         )
 
         # --- 4. 计算损失 ---
+        # clDice 损失 (soft_cldice已经返回损失值，不需要1-操作)
+        loss_cldice = criterion_cldice(y_true_onehot_small, y_pred_small)
 
-        # clDice 损失 (使用降采样后的张量)
-        cl_dice_similarity = criterion_cldice(y_true_onehot_small, y_pred_small)
-        loss_cldice = 1.0 - cl_dice_similarity
-
-        # Dice 损失 (通常需要全分辨率的 logits 和 labels)
+        # Dice 损失
         loss_dice = criterion_dice(outputs, labels)
 
         # 组合损失
         combined_loss = (1.0 - ALPHA_CL) * loss_dice + ALPHA_CL * loss_cldice
+        
+        # 可选：添加调试信息
+        if getattr(args, 'debug_loss', False):
+            print(f"Loss components - Dice: {loss_dice.item():.4f}, clDice: {loss_cldice.item():.4f}, Combined: {combined_loss.item():.4f}")
+        
         return combined_loss
     else :
         raise ValueError("Only ['DiceLoss', 'CrossEntropyLoss', 'dice_plus_ce'] loss is supported.")
