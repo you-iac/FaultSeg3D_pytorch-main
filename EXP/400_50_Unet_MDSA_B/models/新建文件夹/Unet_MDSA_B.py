@@ -136,25 +136,20 @@ class FaultSeg3D(nn.Module):
     def forward(self, x):
         # encoder部分
         x1 = self.inc(x)
-
+        x1 = self.skip_attention_x1(x1)  # 跳跃连接注意力
 
         x2 = self.down1(x1)
-
+        x2 = self.skip_attention_x2(x2)  # 跳跃连接注意力
 
         x3 = self.down2(x2)
-
+        x3 = self.skip_attention_x3(x3)  # 跳跃连接注意力
 
         x4 = self.down3(x3)
         x4 = self.multi_dir_att_deep(x4)  # 编码器深层注意力
 
         # decoder部分
-        x3 = self.skip_attention_x3(x3)  # 跳跃连接注意力
         x = self.up2(x4, x3)
-
-        x2 = self.skip_attention_x2(x2)  # 跳跃连接注意力
         x = self.up3(x, x2)
-
-        x1 = self.skip_attention_x1(x1)  # 跳跃连接注意力
         x = self.up4(x, x1)
         logits = self.outc(x)
         outputs = self.softmax(logits)
