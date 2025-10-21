@@ -16,10 +16,10 @@ class MultiDirectionalSpatialAttention(nn.Module):
 
     def __init__(self, in_channels):
         super(MultiDirectionalSpatialAttention, self).__init__()
-        # 不同方向的卷积核
-        self.conv_x = nn.Conv3d(in_channels, 1, (1, 3, 3), padding=(0, 1, 1))
-        self.conv_y = nn.Conv3d(in_channels, 1, (3, 1, 3), padding=(1, 0, 1))
-        self.conv_z = nn.Conv3d(in_channels, 1, (3, 3, 1), padding=(1, 1, 0))
+        # 不同方向的卷积核 (5,3,3), (3,5,3), (3,3,5)
+        self.conv_x = nn.Conv3d(in_channels, 1, (5, 3, 3), padding=(2, 1, 1))
+        self.conv_y = nn.Conv3d(in_channels, 1, (3, 5, 3), padding=(1, 2, 1))
+        self.conv_z = nn.Conv3d(in_channels, 1, (3, 3, 5), padding=(1, 1, 2))
         self.fusion = nn.Conv3d(3, 1, 1)
         self.sigmoid = nn.Sigmoid()
 
