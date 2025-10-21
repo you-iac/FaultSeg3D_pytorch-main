@@ -100,11 +100,11 @@ class OutConv(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
-
+# 方案C：编码器深层 + 解码器（完整型）
 class FaultSeg3D(nn.Module):
     """
-    在编码器深层和跳跃连接应用多方向空间注意力的3D UNet网络
-    平衡型方案，效果与效率兼顾
+    在编码器深层和解码器应用多方向空间注意力的3D UNet网络
+    完整型方案，效果最佳但计算量较大
     """
 
     def __init__(self, n_channels, n_classes):
@@ -119,63 +119,48 @@ class FaultSeg3D(nn.Module):
         self.down3 = Down(64, 128)
 
         # 在编码器深层添加多方向空间注意力
-        self.multi_dir_att_deep = MultiDirectionalSpatialAttention(128)
-
-        # 在跳跃连接添加多方向空间注意力
-        self.skip_attention_x1 = MultiDirectionalSpatialAttention(16)
-        self.skip_attention_x2 = MultiDirectionalSpatialAttention(32)
-        self.skip_attention_x3 = MultiDirectionalSpatialAttention(64)
+        self.multi_dir_att_encoder = MultiDirectionalSpatialAttention(128)
 
         # 解码器
         self.up2 = Up(192, 64)
         self.up3 = Up(96, 32)
         self.up4 = Up(48, 16)
+
+        # 在解码器添加多方向空间注意力
+        self.multi_dir_att_decoder1 = MultiDirectionalSpatialAttention(64)
+        self.multi_dir_att_decoder2 = MultiDirectionalSpatialAttention(32)
+        self.multi_dir_att_decoder3 = MultiDirectionalSpatialAttention(16)
+
         self.outc = OutConv(16, n_classes)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
         # encoder部分
         x1 = self.inc(x)
-
-
         x2 = self.down1(x1)
-
-
         x3 = self.down2(x2)
-
-
         x4 = self.down3(x3)
-        x4 = self.multi_dir_att_deep(x4)  # 编码器深层注意力
+
+        # 在编码器深层应用多方向空间注意力
+        x4 = self.multi_dir_att_encoder(x4)
 
         # decoder部分
-        x3 = self.skip_attention_x3(x3)  # 跳跃连接注意力
         x = self.up2(x4, x3)
+        x = self.multi_dir_att_decoder1(x)  # 解码器注意力
 
-        x2 = self.skip_attention_x2(x2)  # 跳跃连接注意力
         x = self.up3(x, x2)
+        x = self.multi_dir_att_decoder2(x)  # 解码器注意力
 
-        x1 = self.skip_attention_x1(x1)  # 跳跃连接注意力
         x = self.up4(x, x1)
+        x = self.multi_dir_att_decoder3(x)  # 解码器注意力
+
         logits = self.outc(x)
         outputs = self.softmax(logits)
         return outputs
 
-# 方案B：编码器深层 + 跳跃连接（平衡型）
+# 方案C：编码器深层 + 解码器（完整型）
 if __name__ == '__main__':
     # 查看网络参数量
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net = FaultSeg3D(1, 2).to(device)
     summary(net, input_size=(1, 128, 128, 128))
-
-
-#
-# ================================================================
-# Total params: 1,467,518
-# Trainable params: 1,467,518
-# Non-trainable params: 0
-# ----------------------------------------------------------------
-# Input size (MB): 8.00
-# Forward/backward pass size (MB): 6393.41
-# Params size (MB): 5.60
-# Estimated Total Size (MB): 6407.00
-# ----------------------------------------------------------------
