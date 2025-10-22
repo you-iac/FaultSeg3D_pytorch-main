@@ -2,11 +2,8 @@ import torch
 from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
-import sys
-# 导入 tvdcn 包中的 PackedDeformConv3d
-import torch
-
 from tvdcn.ops import deform_conv3d
+
 
 class MultiDirectionalSpatialAttention(nn.Module):
     """
@@ -41,6 +38,7 @@ class MultiDirectionalSpatialAttention(nn.Module):
         att = self.sigmoid(fused_att)
 
         return x * att
+
 
 class DoubleDeformConv(nn.Module):
 
@@ -194,29 +192,33 @@ class OutConv(nn.Module):
 
 
 class FaultSeg3D(nn.Module):
+    """
+    策略性组合DCN和注意力机制
+    - 编码器中层使用DCN（捕捉形变特征）
+    - 解码器跳跃连接使用注意力（特征筛选）
+    - 避免过度叠加
+    """
+
     def __init__(self, n_channels, n_classes):
         super(FaultSeg3D, self).__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        # 第一和第二层使用可变形卷积
-        self.inc = DoubleConv(n_channels, 16)
-        self.down1 = Down(16, 32, use_deformable=True)
+        # 编码器：只在中间层使用DCN
+        self.inc = DoubleConv(n_channels, 16)  # 浅层不用DCN
+        self.down1 = Down(16, 32, use_deformable=True)  # 中层使用DCN
+        self.down2 = Down(32, 64, use_deformable=True)  # 中层使用DCN
+        self.down3 = Down(64, 128, use_deformable=False)  # 深层不用DCN
 
-        # 剩下的层使用普通卷积
-        self.down2 = Down(32, 64, use_deformable=True)
-        self.down3 = Down(64, 128, use_deformable=True)
-
-        # 在编码器深层添加多方向空间注意力
+        # 只在最深层使用一次注意力
         self.multi_dir_att_deep = MultiDirectionalSpatialAttention(128)
 
-        # 在跳跃连接添加多方向空间注意力
+        # 跳跃连接：只在浅层使用注意力（避免与DCN层重复）
+        # 注意：x2和x3来自DCN层，不再加注意力
+        # 只在x1（非DCN层）加注意力
         self.skip_attention_x1 = MultiDirectionalSpatialAttention(16)
-        self.skip_attention_x2 = MultiDirectionalSpatialAttention(32)
-        self.skip_attention_x3 = MultiDirectionalSpatialAttention(64)
 
-
-
+        # 解码器
         self.up2 = Up(192, 64)
         self.up3 = Up(96, 32)
         self.up4 = Up(48, 16)
@@ -226,20 +228,18 @@ class FaultSeg3D(nn.Module):
     def forward(self, x):
         # encoder部分
         x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
+        x2 = self.down1(x1)  # DCN层
+        x3 = self.down2(x2)  # DCN层
         x4 = self.down3(x3)
-        x4 = self.multi_dir_att_deep(x4)  # 编码器深层注意力
+        x4 = self.multi_dir_att_deep(x4)  # 深层注意力
 
-        # decoder部分
-        x3 = self.skip_attention_x3(x3)  # 跳跃连接注意力
-        x = self.up2(x4, x3)
+        # decoder部分 - 只在非DCN来源的跳跃连接加注意力
+        x = self.up2(x4, x3)  # x3来自DCN，不加注意力
+        x = self.up3(x, x2)  # x2来自DCN，不加注意力
 
-        x2 = self.skip_attention_x2(x2)  # 跳跃连接注意力
-        x = self.up3(x, x2)
-
-        x1 = self.skip_attention_x1(x1)  # 跳跃连接注意力
+        x1 = self.skip_attention_x1(x1)  # x1非DCN，加注意力
         x = self.up4(x, x1)
+
         logits = self.outc(x)
         outputs = self.softmax(logits)
         return outputs
@@ -251,13 +251,8 @@ if __name__ == '__main__':
     net = FaultSeg3D(1, 2).to(device)
     summary(net, input_size=(1, 128, 128, 128))
 
-# ================================================================
-# Total params: 1,602,502
-# Trainable params: 1,602,502
-# Non-trainable params: 0
-# ----------------------------------------------------------------
-# Input size (MB): 8.00
-# Forward/backward pass size (MB): 6634.16
-# Params size (MB): 6.11
-# Estimated Total Size (MB): 6648.27
-# ----------------------------------------------------------------
+# 预期效果：
+# - 减少参数冗余
+# - 降低训练难度
+# - DCN和注意力各司其职，避免冲突
+
