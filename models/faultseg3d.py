@@ -1,162 +1,132 @@
 import torch
-from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
-from tvdcn.ops import deform_conv3d
+from torchsummary import summary
 
 
-class MultiDirectionalSpatialAttention(nn.Module):
+class AxialAttention(nn.Module):
     """
-    多方向空间注意力模块
-    针对细长断层特征，在不同方向上进行注意力计算
+    轴向注意力 - 沿单个轴计算注意力
+    将3D注意力分解为3个1D注意力，大幅降低计算量
     """
 
-    def __init__(self, in_channels):
-        super(MultiDirectionalSpatialAttention, self).__init__()
-        # 不同方向的卷积核 (5,3,3), (3,5,3), (3,3,5)
-        self.conv_x = nn.Conv3d(in_channels, 1, (5, 3, 3), padding=(2, 1, 1))
-        self.conv_y = nn.Conv3d(in_channels, 1, (3, 5, 3), padding=(1, 2, 1))
-        self.conv_z = nn.Conv3d(in_channels, 1, (3, 3, 5), padding=(1, 1, 2))
-        self.fusion = nn.Conv3d(3, 1, 1)
-        self.sigmoid = nn.Sigmoid()
+    def __init__(self, in_channels, axis, reduction=8):
+        """
+        Args:
+            in_channels: 输入通道数
+            axis: 计算注意力的轴 (0=D, 1=H, 2=W)
+            reduction: 降维比例
+        """
+        super(AxialAttention, self).__init__()
+        self.in_channels = in_channels
+        self.axis = axis
+        self.inter_channels = max(in_channels // reduction, 1)
+
+        # Query, Key, Value 投影
+        self.query_conv = nn.Conv1d(in_channels, self.inter_channels, kernel_size=1)
+        self.key_conv = nn.Conv1d(in_channels, self.inter_channels, kernel_size=1)
+        self.value_conv = nn.Conv1d(in_channels, in_channels, kernel_size=1)
+
+        # 输出投影
+        self.gamma = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
         """
         Args:
-            x: 输入特征图 (B, C, D, H, W)
+            x: (B, C, D, H, W)
         Returns:
-            out: 增强后的特征图 (B, C, D, H, W)
+            out: (B, C, D, H, W)
         """
-        # 不同方向的注意力
-        att_x = self.conv_x(x)
-        att_y = self.conv_y(x)
-        att_z = self.conv_z(x)
+        B, C, D, H, W = x.size()
 
-        # 融合多方向注意力
-        multi_dir_att = torch.cat([att_x, att_y, att_z], dim=1)
-        fused_att = self.fusion(multi_dir_att)
-        att = self.sigmoid(fused_att)
+        # 根据axis重排维度
+        if self.axis == 0:  # 沿D轴
+            # (B, C, D, H, W) -> (B*H*W, C, D)
+            x_reshaped = x.permute(0, 3, 4, 1, 2).contiguous()
+            x_reshaped = x_reshaped.view(B * H * W, C, D)
+            spatial_dim = D
+            restore_shape = lambda out: out.view(B, H, W, C, D).permute(0, 3, 4, 1, 2)
 
-        return x * att
+        elif self.axis == 1:  # 沿H轴
+            # (B, C, D, H, W) -> (B*D*W, C, H)
+            x_reshaped = x.permute(0, 2, 4, 1, 3).contiguous()
+            x_reshaped = x_reshaped.view(B * D * W, C, H)
+            spatial_dim = H
+            restore_shape = lambda out: out.view(B, D, W, C, H).permute(0, 3, 1, 4, 2)
+
+        else:  # axis == 2, 沿W轴
+            # (B, C, D, H, W) -> (B*D*H, C, W)
+            x_reshaped = x.permute(0, 2, 3, 1, 4).contiguous()
+            x_reshaped = x_reshaped.view(B * D * H, C, W)
+            spatial_dim = W
+            restore_shape = lambda out: out.view(B, D, H, C, W).permute(0, 3, 1, 2, 4)
+
+        # 计算 Q, K, V
+        query = self.query_conv(x_reshaped)  # (B*spatial_prod, C', spatial_dim)
+        key = self.key_conv(x_reshaped)  # (B*spatial_prod, C', spatial_dim)
+        value = self.value_conv(x_reshaped)  # (B*spatial_prod, C, spatial_dim)
+
+        # 计算注意力
+        # (B*spatial_prod, spatial_dim, C') @ (B*spatial_prod, C', spatial_dim)
+        # -> (B*spatial_prod, spatial_dim, spatial_dim)
+        attention = torch.bmm(query.permute(0, 2, 1), key)
+        attention = F.softmax(attention / (self.inter_channels ** 0.5), dim=-1)
+
+        # 应用注意力
+        # (B*spatial_prod, C, spatial_dim) @ (B*spatial_prod, spatial_dim, spatial_dim)
+        # -> (B*spatial_prod, C, spatial_dim)
+        out = torch.bmm(value, attention.permute(0, 2, 1))
+
+        # 恢复原始形状
+        out = restore_shape(out)
+
+        # 残差连接
+        out = self.gamma * out + x
+        return out
 
 
-class DoubleDeformConv(nn.Module):
+class MultiAxisAttention(nn.Module):
+    """
+    多轴注意力 - 依次在D、H、W三个轴上应用注意力
+    """
 
-    def __init__(self, in_channels, out_channels, mid_channels=None):
-        super(DoubleDeformConv, self).__init__()
-        if mid_channels is None:
-            mid_channels = out_channels
-
-        kernel_size = 3
-        padding = 1
-        num_points = kernel_size * kernel_size * kernel_size  # 3*3*3 = 27
-        offset_mask_channels = 4 * num_points  # 3*K^3 (offset) + 1*K^3 (mask) = 108
-
-        # --- 第一层可变形卷积的组件：in_channels -> mid_channels ---
-
-        # 1. 预测 Offset 和 Mask 的辅助 Conv3D
-        self.offset_mask_conv1 = nn.Conv3d(
-            in_channels, offset_mask_channels, kernel_size=kernel_size, padding=padding
-        )
-
-        # 2. 学习可变形卷积的权重 (作为 DeformConv3d 的 weight 参数)
-        # 权重形状: (Out_C, In_C, K, K, K) = (mid_channels, in_channels, 3, 3, 3)
-        self.weight1 = nn.Parameter(torch.Tensor(mid_channels, in_channels,
-                                                 kernel_size, kernel_size, kernel_size))
-        self.bias1 = nn.Parameter(torch.Tensor(mid_channels))
-
-        nn.init.kaiming_uniform_(self.weight1, a=5)
-        self.bias1.data.zero_()
-
-        self.bn1 = nn.BatchNorm3d(mid_channels)
-
-        # --- 第二层可变形卷积的组件：mid_channels -> out_channels ---
-
-        # 1. 预测 Offset 和 Mask 的辅助 Conv3D
-        # 输入通道: mid_channels (上一层的输出)
-        self.offset_mask_conv2 = nn.Conv3d(
-            mid_channels, offset_mask_channels, kernel_size=kernel_size, padding=padding
-        )
-
-        # 2. 学习可变形卷积的权重 (作为 DeformConv3d 的 weight 参数)
-        # 权重形状: (Out_C, In_C, K, K, K) = (out_channels, mid_channels, 3, 3, 3)
-        self.weight2 = nn.Parameter(torch.Tensor(out_channels, mid_channels,
-                                                 kernel_size, kernel_size, kernel_size))
-        self.bias2 = nn.Parameter(torch.Tensor(out_channels))
-
-        nn.init.kaiming_uniform_(self.weight2, a=5)
-        self.bias2.data.zero_()
-
-        self.bn2 = nn.BatchNorm3d(out_channels)
+    def __init__(self, in_channels, reduction=8):
+        super(MultiAxisAttention, self).__init__()
+        self.att_d = AxialAttention(in_channels, axis=0, reduction=reduction)
+        self.att_h = AxialAttention(in_channels, axis=1, reduction=reduction)
+        self.att_w = AxialAttention(in_channels, axis=2, reduction=reduction)
 
     def forward(self, x):
-        num_points = 27
-
-        # --- 第一层可变形卷积 ---
-
-        # 1. 生成 offset (3*K^3) 和 mask (1*K^3)
-        offset_mask1 = self.offset_mask_conv1(x)
-        offset1 = offset_mask1[:, :3 * num_points, :, :, :]
-        mask1 = torch.sigmoid(offset_mask1[:, 3 * num_points:, :, :, :])
-
-        # 2. 执行可变形卷积
-        x = deform_conv3d(
-            x, self.weight1, offset1, mask1, self.bias1,
-            stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1), groups=1
-        )
-
-        x = self.bn1(x)
-        x = F.relu(x, inplace=True)
-
-        # --- 第二层可变形卷积 ---
-
-        # 1. 生成 offset 和 mask
-        offset_mask2 = self.offset_mask_conv2(x)
-        offset2 = offset_mask2[:, :3 * num_points, :, :, :]
-        mask2 = torch.sigmoid(offset_mask2[:, 3 * num_points:, :, :, :])
-
-        # 2. 执行可变形卷积
-        x = deform_conv3d(
-            x, self.weight2, offset2, mask2, self.bias2,
-            stride=(1, 1, 1), padding=(1, 1, 1), dilation=(1, 1, 1), groups=1
-        )
-
-        x = self.bn2(x)
-        x = F.relu(x, inplace=True)
-
+        x = self.att_d(x)  # D轴注意力
+        x = self.att_h(x)  # H轴注意力
+        x = self.att_w(x)  # W轴注意力
         return x
 
 
 class DoubleConv(nn.Module):
-
-    def __init__(self, in_channels, out_channels, mid_channels=None, use_deformable=False):
+    def __init__(self, in_channels, out_channels, mid_channels=None):
         super().__init__()
         if not mid_channels:
             mid_channels = out_channels
-
-        if use_deformable:
-            # 使用 tvdcn.ops.PackedDeformConv3d 替换 nn.Conv3d
-            self.double_conv = DoubleDeformConv(in_channels, out_channels, mid_channels)
-        else:
-            self.double_conv = nn.Sequential(
-                nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(mid_channels),
-                nn.ReLU(inplace=True),
-                nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm3d(out_channels),
-                nn.ReLU(inplace=True)
-            )
+        self.double_conv = nn.Sequential(
+            nn.Conv3d(in_channels, mid_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(mid_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True)
+        )
 
     def forward(self, x):
         return self.double_conv(x)
 
 
 class Down(nn.Module):
-    def __init__(self, in_channels, out_channels, use_deformable=False):
+    def __init__(self, in_channels, out_channels):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool3d(2),
-            DoubleConv(in_channels, out_channels, use_deformable=use_deformable)
+            DoubleConv(in_channels, out_channels)
         )
 
     def forward(self, x):
@@ -166,7 +136,6 @@ class Down(nn.Module):
 class Up(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
-
         self.up = nn.Upsample(scale_factor=(2, 2, 2), mode='trilinear', align_corners=True)
         self.conv = DoubleConv(in_channels, out_channels)
 
@@ -193,10 +162,8 @@ class OutConv(nn.Module):
 
 class FaultSeg3D(nn.Module):
     """
-    策略性组合DCN和注意力机制
-    - 编码器中层使用DCN（捕捉形变特征）
-    - 解码器跳跃连接使用注意力（特征筛选）
-    - 避免过度叠加
+    使用轴向注意力的3D UNet
+    可以在大尺寸特征图上使用，显存消耗低
     """
 
     def __init__(self, n_channels, n_classes):
@@ -204,19 +171,21 @@ class FaultSeg3D(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        # 编码器：只在中间层使用DCN
-        self.inc = DoubleConv(n_channels, 16)  # 浅层不用DCN
-        self.down1 = Down(16, 32, use_deformable=True)  # 中层使用DCN
-        self.down2 = Down(32, 64, use_deformable=True)  # 中层使用DCN
-        self.down3 = Down(64, 128, use_deformable=False)  # 深层不用DCN
+        # 编码器
+        self.inc = DoubleConv(n_channels, 16)
+        self.down1 = Down(16, 32)
+        self.down2 = Down(32, 64)
+        self.down3 = Down(64, 128)
 
-        # 只在最深层使用一次注意力
-        self.multi_dir_att_deep = MultiDirectionalSpatialAttention(128)
+        # 在多个层使用轴向注意力（可以在大尺寸上使用）
+        # 64×64×64层
+        self.axial_att_64 = MultiAxisAttention(32, reduction=8)
 
-        # 跳跃连接：只在浅层使用注意力（避免与DCN层重复）
-        # 注意：x2和x3来自DCN层，不再加注意力
-        # 只在x1（非DCN层）加注意力
-        self.skip_attention_x1 = MultiDirectionalSpatialAttention(16)
+        # 32×32×32层
+        self.axial_att_32 = MultiAxisAttention(64, reduction=8)
+
+        # 16×16×16层
+        self.axial_att_16 = MultiAxisAttention(128, reduction=8)
 
         # 解码器
         self.up2 = Up(192, 64)
@@ -227,32 +196,44 @@ class FaultSeg3D(nn.Module):
 
     def forward(self, x):
         # encoder部分
-        x1 = self.inc(x)
-        x2 = self.down1(x1)  # DCN层
-        x3 = self.down2(x2)  # DCN层
-        x4 = self.down3(x3)
-        x4 = self.multi_dir_att_deep(x4)  # 深层注意力
+        x1 = self.inc(x)  # 16 × 128³
 
-        # decoder部分 - 只在非DCN来源的跳跃连接加注意力
-        x = self.up2(x4, x3)  # x3来自DCN，不加注意力
-        x = self.up3(x, x2)  # x2来自DCN，不加注意力
+        x2 = self.down1(x1)  # 32 × 64³
+        x2 = self.axial_att_64(x2)  # 轴向注意力
 
-        x1 = self.skip_attention_x1(x1)  # x1非DCN，加注意力
+        x3 = self.down2(x2)  # 64 × 32³
+        x3 = self.axial_att_32(x3)  # 轴向注意力
+
+        x4 = self.down3(x3)  # 128 × 16³
+        x4 = self.axial_att_16(x4)  # 轴向注意力
+
+        # decoder部分
+        x = self.up2(x4, x3)
+        x = self.up3(x, x2)
         x = self.up4(x, x1)
-
         logits = self.outc(x)
         outputs = self.softmax(logits)
         return outputs
 
 
 if __name__ == '__main__':
-    # 查看网络参数量
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     net = FaultSeg3D(1, 2).to(device)
     summary(net, input_size=(1, 128, 128, 128))
 
-# 预期效果：
-# - 减少参数冗余
-# - 降低训练难度
-# - DCN和注意力各司其职，避免冲突
+# 显存分析（轴向注意力）：
+#
+# 对于128×128×128的特征图：
+# - 传统自注意力: 128³ × 128³ = 4.4 trillion（不可行）
+# - 轴向注意力:
+#   * D轴: (128×128) × 128 × 128 = 268M
+#   * H轴: (128×128) × 128 × 128 = 268M
+#   * W轴: (128×128) × 128 × 128 = 268M
+#   总计: 804M（可行！）
+#
+# 复杂度对比:
+# - 传统: O(N²) = O((128³)²)
+# - 轴向: O(3×N×sqrt(N)) = O(3×128³×128)
+# 降低约 128³/3 = 700,000倍！✓
+
 
