@@ -274,14 +274,16 @@ class FaultSeg3D(nn.Module):
         self.down3 = Down(64, 128, use_deformable=True)
         
         # 在多个层使用轴向注意力（可以在大尺寸上使用）
+        # 16×16×16层
+        self.axial_att_16 = MultiAxisAttention(16, reduction=8)
+
         # 64×64×64层
-        self.axial_att_64 = MultiAxisAttention(32, reduction=8)
+        self.axial_att_32 = MultiAxisAttention(32, reduction=8)
         
         # 32×32×32层
-        self.axial_att_32 = MultiAxisAttention(64, reduction=8)
+        self.axial_att_64 = MultiAxisAttention(64, reduction=8)
         
-        # 16×16×16层
-        self.axial_att_16 = MultiAxisAttention(128, reduction=8)
+
 
         # 解码器
         self.up2 = Up(192, 64)
@@ -295,18 +297,21 @@ class FaultSeg3D(nn.Module):
         x1 = self.inc(x)        # 16 × 128³
         
         x2 = self.down1(x1)     # 32 × 64³
-        x2 = self.axial_att_64(x2)  # 轴向注意力
-        
+
         x3 = self.down2(x2)    # 64 × 32³
-        x3 = self.axial_att_32(x3)  # 轴向注意力
-        
+
         x4 = self.down3(x3)    # 128 × 16³
-        x4 = self.axial_att_16(x4)  # 轴向注意力
 
         # decoder部分
         x = self.up2(x4, x3)
+        x = self.axial_att_64(x)  # 轴向注意力
+
         x = self.up3(x, x2)
+        x = self.axial_att_32(x)  # 轴向注意力
+
         x = self.up4(x, x1)
+        x = self.axial_att_16(x)  # 轴向注意力
+
         logits = self.outc(x)
         outputs = self.softmax(logits)
         return outputs
