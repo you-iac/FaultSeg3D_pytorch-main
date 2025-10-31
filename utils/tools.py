@@ -108,7 +108,7 @@ def compute_loss(outputs, labels, args):
         loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
 
         # 组合损失（可调整权重系数）
-        combined_loss = loss_dice + loss_ce  # 简单相加
+        combined_loss = loss_dice + 2*loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
     elif args.loss_func == 'dice_ce_plus_smooth':
