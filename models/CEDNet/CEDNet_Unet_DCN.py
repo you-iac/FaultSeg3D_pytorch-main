@@ -1,12 +1,16 @@
 """
-FaultSeg3D - 基于 CEDNet 架构的 3D 地震断层分割网络
+FaultSeg3D - 基于 CEDNet 架构的 3D 地震断层分割网络 (DCN 增强版)
 
 完整实现了 CEDNet 的级联编码-解码结构，包括：
-- Stem + P2 初始特征提取
+- Stem + P2 初始特征提取 (使用 DCN 可变形卷积)
 - 3 个级联 Stage (编码-解码对)
 - PPM 金字塔池化模块
 - UPerNet 多尺度融合
 - 分割头
+
+DCN 改进：
+- Stem 的两层卷积替换为 DCN，增强初始特征提取的自适应能力
+- P2 下采样替换为 DCN，在降采样时保持几何形变感知
 
 输入: (B, 1, 128, 128, 128) - 地震数据
 输出: (B, 2, 128, 128, 128) - 二分类分割
@@ -15,6 +19,7 @@ FaultSeg3D - 基于 CEDNet 架构的 3D 地震断层分割网络
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tvdcn.ops import deform_conv3d
 
 
 # ===== 基础组件 =====
@@ -55,6 +60,70 @@ class LayerNorm3d(nn.Module):
         s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)
         x = self.weight[None, :, None, None, None] * x + self.bias[None, :, None, None, None]
+        return x
+
+
+class DeformConv3dBlock(nn.Module):
+    """
+    3D 可变形卷积块
+    
+    支持不同的 stride 和 kernel_size
+    结构: Offset/Mask 预测 → DCN → Norm → Activation
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, 
+                 use_gelu=True):
+        super().__init__()
+        
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        
+        num_points = kernel_size * kernel_size * kernel_size
+        offset_mask_channels = 4 * num_points  # 3*K^3 (offset) + 1*K^3 (mask)
+        
+        # Offset 和 Mask 预测卷积
+        # 关键修复：offset 预测需要使用相同的 stride，确保输出空间维度匹配
+        self.offset_mask_conv = nn.Conv3d(
+            in_channels, offset_mask_channels, 
+            kernel_size=kernel_size, 
+            stride=stride,  # 使用相同的 stride
+            padding=padding
+        )
+        
+        # DCN 权重参数
+        self.weight = nn.Parameter(
+            torch.Tensor(out_channels, in_channels, kernel_size, kernel_size, kernel_size)
+        )
+        self.bias = nn.Parameter(torch.Tensor(out_channels))
+        
+        # 初始化权重
+        nn.init.kaiming_uniform_(self.weight, a=0)
+        self.bias.data.zero_()
+        
+        # 归一化和激活
+        self.norm = LayerNorm3d(out_channels)
+        self.act = nn.GELU() if use_gelu else nn.ReLU(inplace=True)
+        
+    def forward(self, x):
+        num_points = self.kernel_size ** 3
+        
+        # 预测 offset 和 mask
+        offset_mask = self.offset_mask_conv(x)
+        offset = offset_mask[:, :3 * num_points, :, :, :]
+        mask = torch.sigmoid(offset_mask[:, 3 * num_points:, :, :, :])
+        
+        # 执行可变形卷积
+        x = deform_conv3d(
+            x, self.weight, offset, mask, self.bias,
+            stride=(self.stride, self.stride, self.stride),
+            padding=(self.padding, self.padding, self.padding),
+            dilation=(1, 1, 1),
+            groups=1
+        )
+        
+        x = self.norm(x)
+        x = self.act(x)
+        
         return x
 
 
@@ -380,14 +449,10 @@ class FaultSeg3D(nn.Module):
         self.n_classes = n_classes
         self.num_stages = num_stages
 
-        # ===== Stem: 128³ → 64³ =====
+        # ===== Stem: 128³ → 64³ (使用 DCN) =====
         self.stem = nn.Sequential(
-            nn.Conv3d(n_channels, dims[0]//2, kernel_size=3, stride=1, padding=1),
-            LayerNorm3d(dims[0]//2),
-            nn.GELU(),
-            nn.Conv3d(dims[0]//2, dims[0], kernel_size=3, stride=2, padding=1),
-            LayerNorm3d(dims[0]),
-            nn.GELU(),
+            DeformConv3dBlock(n_channels, dims[0]//2, kernel_size=3, stride=1, padding=1, use_gelu=True),
+            DeformConv3dBlock(dims[0]//2, dims[0], kernel_size=3, stride=2, padding=1, use_gelu=True),
         )
 
         # ===== P2 Stage: 64³ 特征提取 + 下采样到 32³ =====
@@ -402,10 +467,10 @@ class FaultSeg3D(nn.Module):
                                      layer_scale_init_value=layer_scale_init_value))
         self.p2_blocks = nn.Sequential(*p2_blocks)
 
-        # P2 下采样
-        self.p2_downsample = nn.Sequential(
-            LayerNorm3d(dims[0]),
-            nn.Conv3d(dims[0], dims[1], kernel_size=2, stride=2)
+        # P2 下采样 (使用 DCN)
+        # 注意：这里使用 kernel_size=3 而不是 2，因为 DCN 需要足够的感受野
+        self.p2_downsample = DeformConv3dBlock(
+            dims[0], dims[1], kernel_size=3, stride=2, padding=1, use_gelu=True
         )
 
         # ===== 级联 Stages =====
@@ -534,11 +599,12 @@ class FaultSeg3D(nn.Module):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
 
         return {
-            'model_name': 'FaultSeg3D (CEDNet)',
+            'model_name': 'FaultSeg3D (CEDNet + DCN)',
             'total_params': f'{total_params / 1e6:.2f}M',
             'trainable_params': f'{trainable_params / 1e6:.2f}M',
             'dims': [16, 32, 64, 128],
             'num_stages': self.num_stages,
+            'dcn_enabled': 'Stem + P2',
         }
 
 
@@ -546,7 +612,7 @@ class FaultSeg3D(nn.Module):
 
 if __name__ == '__main__':
     print("="*70)
-    print("FaultSeg3D (CEDNet 3D架构) - 模型测试")
+    print("FaultSeg3D (CEDNet + DCN 3D架构) - 模型测试")
     print("="*70)
 
     # 创建模型
@@ -631,7 +697,7 @@ if __name__ == '__main__':
         print(f"  c5: (128, 8, 8, 8)     - 1/16 分辨率")
 
     print("\n" + "="*70)
-    print("🎉 FaultSeg3D (CEDNet) 测试完成!")
+    print("🎉 FaultSeg3D (CEDNet + DCN) 测试完成!")
     print("="*70)
 
     # 使用说明
