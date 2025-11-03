@@ -37,16 +37,15 @@
         ▼ 特征金字塔: [c1, c2, c3, c4, c5]
         │
 ┌───────┴─────────────────────────────────────────────────────────────────────┐
-│  阶段 6: UPerNet 多尺度融合 (5层)                                             │
-│  PPM(c5) → 逐步融合: C5→C4→C3→C2→C1                                          │
-│  → 输出 (64, 128³)                                                           │
+│  阶段 6: UPerNet 多尺度融合 (5层，通道数逐步递减)                             │
+│  PPM(c5) → 逐步融合: C5(64)→C4(48)→C3(32)→C2(24)→C1(16)                    │
+│  → 输出 (16, 128³)                                                           │
 └───────┬─────────────────────────────────────────────────────────────────────┘
         │
         ▼
 ┌───────┴─────────────────────────────────────────────────────────────────────┐
-│  阶段 7: 分割头 (保持 128³)                                                   │
-│  特征精炼: 64 → 32 → 16 通道                                                  │
-│  分类: 16 → 2 通道                                                           │
+│  阶段 7: 分类头 (保持 128³)                                                   │
+│  直接分类: 16 → 2 通道                                                        │
 │  Softmax                                                                     │
 └───────┬─────────────────────────────────────────────────────────────────────┘
         │
@@ -66,8 +65,8 @@ FaultSeg3D - 基于 CEDNet 架构的 3D 地震断层分割网络 (UNet Hybrid �
 1. 在 128³ 分辨率提取初始特征 (类似 UNet)
 2. P2 统一处理下采样和特征提取
 3. 通过 CEDNet 主干提取多尺度特征
-4. UPerNet 逐步融合回 128³ 分辨率
-5. 渐进式降维: 64 → 32 → 16 → 2 通道
+4. UPerNet 逐步融合回 128³ 分辨率（通道数逐步递减）
+5. 渐进式降维: 64 → 48 → 32 → 24 → 16 → 2 通道
 
 输入: (B, 1, 128, 128, 128) - 地震数据
 输出: (B, 2, 128, 128, 128) - 二分类分割
@@ -330,26 +329,28 @@ class UPerNet3D(nn.Module):
     功能：
     1. PPM 增强最深层特征 C5
     2. 逐步融合: C5→C4→C3→C2→C1
-    3. 每一步: 上采样 + 相加 + 卷积融合
+    3. 每一步: 上采样 + UNet拼接 + 卷积融合
 
     流程:
         C5 (128, 8³) → PPM增强 → 1×1 Conv → (64, 8³)
-          ↓ 上采样×2 + 融合
-        C4 (64, 16³) → 1×1 Conv → + → Conv 3×3×3 → (64, 16³)
-          ↓ 上采样×2 + 融合
-        C3 (32, 32³) → 1×1 Conv → + → Conv 3×3×3 → (64, 32³)
-          ↓ 上采样×2 + 融合
-        C2 (16, 64³) → 1×1 Conv → + → Conv 3×3×3 → (64, 64³)
-          ↓ 上采样×2 + 融合
-        C1 (16, 128³) → 1×1 Conv → + → Conv 3×3×3 → (64, 128³)
+          ↓ 上采样×2 + UNet拼接
+        C4 (64, 16³) → 1×1 Conv(48) → cat → Conv 3×3×3 → (48, 16³)
+          ↓ 上采样×2 + UNet拼接
+        C3 (32, 32³) → 1×1 Conv(32) → cat → Conv 3×3×3 → (32, 32³)
+          ↓ 上采样×2 + UNet拼接
+        C2 (16, 64³) → 1×1 Conv(24) → cat → Conv 3×3×3 → (24, 64³)
+          ↓ 上采样×2 + UNet拼接
+        C1 (16, 128³) → 1×1 Conv(16) → cat → Conv 3×3×3 → (16, 128³)
     """
 
-    def __init__(self, in_channels=[16, 16, 32, 64, 128], channels=64,
+    def __init__(self, in_channels=[16, 16, 32, 64, 128], 
                  pool_scales=(1, 2, 3), ppm_channels=32):
         super().__init__()
 
         self.in_channels = in_channels
-        self.channels = channels
+        
+        # 逐步递减的通道数配置: 64 → 48 → 32 → 24 → 16
+        self.decode_channels = [64, 48, 32, 24, 16]
 
         # PPM 模块（只对最深层 c5）
         self.ppm = PPM3D(in_channels[-1], ppm_channels, pool_scales)
@@ -357,26 +358,31 @@ class UPerNet3D(nn.Module):
         # PPM Bottleneck: 增强后统一通道数
         ppm_out_channels = in_channels[-1] + len(pool_scales) * ppm_channels
         self.ppm_bottleneck = nn.Sequential(
-            nn.Conv3d(ppm_out_channels, channels, kernel_size=3, padding=1),
-            LayerNorm3d(channels),
+            nn.Conv3d(ppm_out_channels, self.decode_channels[0], kernel_size=3, padding=1),
+            LayerNorm3d(self.decode_channels[0]),
             nn.GELU()
         )
 
-        # 侧边卷积（统一通道数到 channels）
+        # 侧边卷积（统一通道数到对应的decode_channels）
         self.lateral_convs = nn.ModuleList()
-        for in_ch in in_channels[:-1]:  # 不包括c5，c5已经在ppm_bottleneck处理
+        for i, in_ch in enumerate(in_channels[:-1]):  # 不包括c5，c5已经在ppm_bottleneck处理
+            # c1, c2, c3, c4 分别对应 decode_channels[4], [3], [2], [1]
+            out_ch = self.decode_channels[4 - i]  # 反向索引
             self.lateral_convs.append(nn.Sequential(
-                nn.Conv3d(in_ch, channels, kernel_size=1),
-                LayerNorm3d(channels),
+                nn.Conv3d(in_ch, out_ch, kernel_size=1),
+                LayerNorm3d(out_ch),
                 nn.GELU()
             ))
 
-        # 上采样模块（逐步融合）
+        # 上采样模块（UNet拼接风格融合，通道数逐步递减）
         self.upsample_convs = nn.ModuleList()
         for i in range(len(in_channels) - 1):  # 4次上采样融合
+            # 拼接后的输入通道数 + 输出通道数（逐步递减）
+            in_ch = self.decode_channels[i] + self.decode_channels[i + 1]
+            out_ch = self.decode_channels[i + 1]
             self.upsample_convs.append(nn.Sequential(
-                nn.Conv3d(channels, channels, kernel_size=3, padding=1),
-                LayerNorm3d(channels),
+                nn.Conv3d(in_ch, out_ch, kernel_size=3, padding=1),
+                LayerNorm3d(out_ch),
                 nn.GELU()
             ))
 
@@ -389,48 +395,49 @@ class UPerNet3D(nn.Module):
         c4: (B, 64, 16, 16, 16)
         c5: (B, 128, 8, 8, 8)
 
-        返回: (B, channels, 128, 128, 128)
+        返回: (B, 16, 128, 128, 128) - 逐步递减到16通道
         """
         c1, c2, c3, c4, c5 = features
 
         # 1. PPM 增强 c5 并统一通道数
         ppm_outs = self.ppm(c5)
         c5_enhanced = torch.cat([c5] + ppm_outs, dim=1)
-        c5_fused = self.ppm_bottleneck(c5_enhanced)  # (B, channels, 8, 8, 8)
+        c5_fused = self.ppm_bottleneck(c5_enhanced)  # (B, 64, 8, 8, 8)
 
-        # 2. 侧边卷积: 统一通道数
-        c1_lateral = self.lateral_convs[0](c1)  # (B, channels, 128, 128, 128)
-        c2_lateral = self.lateral_convs[1](c2)  # (B, channels, 64, 64, 64)
-        c3_lateral = self.lateral_convs[2](c3)  # (B, channels, 32, 32, 32)
-        c4_lateral = self.lateral_convs[3](c4)  # (B, channels, 16, 16, 16)
+        # 2. 侧边卷积: 统一通道数（逐步递减）
+        c1_lateral = self.lateral_convs[0](c1)  # (B, 16, 128, 128, 128)
+        c2_lateral = self.lateral_convs[1](c2)  # (B, 24, 64, 64, 64)
+        c3_lateral = self.lateral_convs[2](c3)  # (B, 32, 32, 32, 32)
+        c4_lateral = self.lateral_convs[3](c4)  # (B, 48, 16, 16, 16)
 
-        # 3. 逐步融合 (从深到浅): C5 → C4 → C3 → C2 → C1
+        # 3. 逐步融合 (从深到浅, UNet拼接风格, 通道数逐步递减): 
+        #    C5(64) → C4(48) → C3(32) → C2(24) → C1(16)
 
-        # C5 → C4 融合
+        # C5 → C4 融合: 64 → 48
         c5_up = F.interpolate(c5_fused, scale_factor=2, mode='trilinear',
-                              align_corners=False)  # (B, channels, 16, 16, 16)
-        c4_fused = c4_lateral + c5_up  # 残差相加
-        c4_fused = self.upsample_convs[0](c4_fused)  # 融合卷积
+                              align_corners=False)  # (B, 64, 16, 16, 16)
+        c4_fused = torch.cat([c4_lateral, c5_up], dim=1)  # UNet拼接 (B, 112, 16, 16, 16)
+        c4_fused = self.upsample_convs[0](c4_fused)  # 融合卷积 (B, 48, 16, 16, 16)
 
-        # C4 → C3 融合
+        # C4 → C3 融合: 48 → 32
         c4_up = F.interpolate(c4_fused, scale_factor=2, mode='trilinear',
-                              align_corners=False)  # (B, channels, 32, 32, 32)
-        c3_fused = c3_lateral + c4_up
-        c3_fused = self.upsample_convs[1](c3_fused)
+                              align_corners=False)  # (B, 48, 32, 32, 32)
+        c3_fused = torch.cat([c3_lateral, c4_up], dim=1)  # UNet拼接 (B, 80, 32, 32, 32)
+        c3_fused = self.upsample_convs[1](c3_fused)  # (B, 32, 32, 32, 32)
 
-        # C3 → C2 融合
+        # C3 → C2 融合: 32 → 24
         c3_up = F.interpolate(c3_fused, scale_factor=2, mode='trilinear',
-                              align_corners=False)  # (B, channels, 64, 64, 64)
-        c2_fused = c2_lateral + c3_up
-        c2_fused = self.upsample_convs[2](c2_fused)
+                              align_corners=False)  # (B, 32, 64, 64, 64)
+        c2_fused = torch.cat([c2_lateral, c3_up], dim=1)  # UNet拼接 (B, 56, 64, 64, 64)
+        c2_fused = self.upsample_convs[2](c2_fused)  # (B, 24, 64, 64, 64)
 
-        # C2 → C1 融合
+        # C2 → C1 融合: 24 → 16
         c2_up = F.interpolate(c2_fused, scale_factor=2, mode='trilinear',
-                              align_corners=False)  # (B, channels, 128, 128, 128)
-        c1_fused = c1_lateral + c2_up
-        c1_fused = self.upsample_convs[3](c1_fused)
+                              align_corners=False)  # (B, 24, 128, 128, 128)
+        c1_fused = torch.cat([c1_lateral, c2_up], dim=1)  # UNet拼接 (B, 40, 128, 128, 128)
+        c1_fused = self.upsample_convs[3](c1_fused)  # (B, 16, 128, 128, 128)
 
-        return c1_fused  # (B, channels, 128, 128, 128)
+        return c1_fused  # (B, 16, 128, 128, 128)
 
 
 # ===== 主模型 =====
@@ -531,29 +538,17 @@ class FaultSeg3D(nn.Module):
 
             cur_dp += sum(depths[1:])
 
-        # ===== UPerNet 多尺度融合 =====
+        # ===== UPerNet 多尺度融合（逐步递减通道数）=====
         # 输入: [c1, c2, c3, c4, c5] = [(16,128³), (16,64³), (32,32³), (64,16³), (128,8³)]
+        # 输出: (16, 128³) - 通道数从64逐步递减到16
         self.upernet = UPerNet3D(
             in_channels=[dims[0]] + dims,  # [16, 16, 32, 64, 128]
-            channels=upernet_channels,
             pool_scales=ppm_scales,
             ppm_channels=32
         )
 
-        # ===== 分割头（特征精炼到 16 通道）=====
-        self.seg_head = nn.Sequential(
-            # 第一阶段：特征精炼
-            nn.Conv3d(upernet_channels, upernet_channels // 2, kernel_size=3, padding=1),
-            LayerNorm3d(upernet_channels // 2),
-            nn.GELU(),
-
-            # 第二阶段：降维到 16 通道
-            nn.Conv3d(upernet_channels // 2, dims[0], kernel_size=3, padding=1),
-            LayerNorm3d(dims[0]),
-            nn.GELU(),
-        )
-
-        # 最终分类层（16 → 2）
+        # ===== 分割头（直接从 16 通道分类）=====
+        # UPerNet已经输出16通道(128³)，直接分类即可
         self.classifier = nn.Conv3d(dims[0], n_classes, kernel_size=1)
 
         self.softmax = nn.Softmax(dim=1)
@@ -609,14 +604,11 @@ class FaultSeg3D(nn.Module):
         # c4: (B, 64, 16, 16, 16)
         # c5: (B, 128, 8, 8, 8)
 
-        # UPerNet 逐步多尺度融合: C5→C4→C3→C2→C1 → 128³
-        fused = self.upernet(features)  # (B, 64, 128, 128, 128)
+        # UPerNet 逐步多尺度融合: C5(64)→C4(48)→C3(32)→C2(24)→C1(16) → 128³
+        fused = self.upernet(features)  # (B, 16, 128, 128, 128)
 
-        # 分割头：特征精炼到 16 通道
-        refined = self.seg_head(fused)  # (B, 16, 128, 128, 128)
-
-        # 最终分类 (16 → 2)
-        logits = self.classifier(refined)  # (B, 2, 128, 128, 128)
+        # 直接分类 (16 → n_classes)
+        logits = self.classifier(fused)  # (B, 2, 128, 128, 128)
         output = self.softmax(logits)
 
         return output
@@ -869,44 +861,38 @@ python main.py --mode pred --exp CEDNet_400_50 \\
 │  └────────────────────────────────────────────────────────────┘             │
 │                                                                              │
 │  ┌────────────────────────────────────────────────────────────┐             │
-│  │  2. 逐步融合 (FPN 风格, 融合到 128³)                         │             │
+│  │  2. 逐步融合 (UNet 拼接风格, 融合到 128³)                   │             │
 │  │                                                             │             │
-│  │     c1 (16,128³) → Lateral Conv → 64 ──────────────────┐   │             │
+│  │     c1 (16,128³) → Lateral Conv → 16 ──────────────────┐   │             │
 │  │                                                         │   │             │
-│  │     c2 (16,64³)  → Lateral Conv → 64 ──────────────┐   │   │             │
+│  │     c2 (16,64³)  → Lateral Conv → 24 ──────────────┐   │   │             │
 │  │                                                     │   │   │             │
-│  │     c3 (32,32³)  → Lateral Conv → 64 ──────────┐   │   │   │             │
+│  │     c3 (32,32³)  → Lateral Conv → 32 ──────────┐   │   │   │             │
 │  │                                                 │   │   │   │             │
-│  │     c4 (64,16³)  → Lateral Conv → 64 ──────┐   │   │   │   │             │
+│  │     c4 (64,16³)  → Lateral Conv → 48 ──────┐   │   │   │   │             │
 │  │                                             │   │   │   │   │             │
 │  │     c5_fused (64,8³)                        │   │   │   │   │             │
 │  │            ↓ Up×2                           │   │   │   │   │             │
-│  │     c4 (64,16³) + ──────────────────────────┘   │   │   │   │             │
-│  │            ↓ Fusion Conv                        │   │   │   │             │
+│  │     c4 (48,16³) cat ────────────────────────┘   │   │   │   │             │
+│  │            ↓ Fusion Conv (112→48)               │   │   │   │             │
 │  │            ↓ Up×2                               │   │   │   │             │
-│  │     c3 (64,32³) + ──────────────────────────────┘   │   │   │             │
-│  │            ↓ Fusion Conv                            │   │   │             │
+│  │     c3 (32,32³) cat ────────────────────────────┘   │   │   │             │
+│  │            ↓ Fusion Conv (80→32)                    │   │   │             │
 │  │            ↓ Up×2                                   │   │   │             │
-│  │     c2 (64,64³) + ──────────────────────────────────┘   │   │             │
-│  │            ↓ Fusion Conv                                │   │             │
+│  │     c2 (24,64³) cat ────────────────────────────────┘   │   │             │
+│  │            ↓ Fusion Conv (56→24)                        │   │             │
 │  │            ↓ Up×2                                       │   │             │
-│  │     c1 (64,128³) + ────────────────────────────────────┘   │             │
-│  │            ↓ Fusion Conv                                    │             │
-│  │         输出 (64, 128³)                                     │             │
+│  │     c1 (16,128³) cat ───────────────────────────────────┘   │             │
+│  │            ↓ Fusion Conv (40→16)                            │             │
+│  │         输出 (16, 128³)                                     │             │
 │  └────────────────────────────────────────────────────────────┘             │
 └───────┬───────────────────────────────────────────────────────────────────────┘
         │
-        ▼ (B, 64, 128³)
+        ▼ (B, 16, 128³)
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    分割头 (渐进式降维，保持 128³)                             │
+│                        分类头 (保持 128³)                                     │
 │  ┌─────────────────────────────────────────────────────────┐                │
-│  │  特征精炼:                                              │                │
-│  │    Conv3d(64→32) + LayerNorm + GELU                    │                │
-│  │    Conv3d(32→16) + LayerNorm + GELU                    │                │
-│  └─────────────────────────────────────────────────────────┘                │
-│         ↓ (B, 16, 128³)                                                      │
-│  ┌─────────────────────────────────────────────────────────┐                │
-│  │  分类器: Conv3d(16→2, 1×1×1)                           │                │
+│  │  直接分类: Conv3d(16→2, 1×1×1)                          │                │
 │  └─────────────────────────────────────────────────────────┘                │
 │         ↓ (B, 2, 128³)                                                       │
 │  ┌─────────────────────────────────────────────────────────┐                │
@@ -926,9 +912,9 @@ python main.py --mode pred --exp CEDNet_400_50 \\
 ║ ✓ CEDBlock: DWConv + MLP + Residual + DropPath                               ║
 ║ ✓ 5层特征金字塔: 128³, 64³, 32³, 16³, 8³                                   ║
 ║ ✓ PPM 金字塔池化: 全局上下文聚合                                             ║
-║ ✓ UPerNet 风格融合: 逐步上采样到 128³ (5层融合)                              ║
-║ ✓ 渐进式降维: 64 → 32 → 16 → 2 通道                                         ║
-║ ✓ 无上采样分割头: 直接在原始分辨率输出                                       ║
-║ ✓ 参数量: ~4-6M (比原版稍多，因为多了 c1 层)                                 ║
+║ ✓ UPerNet 风格融合: UNet拼接 + 通道数逐步递减 (64→48→32→24→16)             ║
+║ ✓ 渐进式降维: 64 → 48 → 32 → 24 → 16 → 2 通道                               ║
+║ ✓ 简洁分类头: 直接从16通道分类，无需额外特征精炼                             ║
+║ ✓ 参数量: ~3-5M (优化后的通道设计)                                           ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
