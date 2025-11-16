@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss
+from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss,WeightedCrossEntropyDiceLoss
 
 from .cldice import soft_cldice, soft_dice
 from .TopologicalLoss import TopologicalLoss
@@ -92,7 +92,6 @@ def compute_loss(outputs, labels, args):
         criterion = DiceLoss().to(args.device)
         loss = criterion(outputs, labels)
         return loss
-
     elif args.loss_func == 'cross_with_weight':
         neg = (1 - labels).sum()  # 算有多少个0
         pos = labels.sum()  # 算有多少个1
@@ -117,6 +116,11 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
+    elif args.loss_func == '_D+MSDW_C':
+        "dice_plus_MultiscaleDensityWeights"
+        loss_dice = WeightedCrossEntropyDiceLoss().to(args.device)
+        loss = loss_dice(outputs, labels)
+        return loss
     elif args.loss_func == 'dice_plus_PatchDice':
         # 计算Patch Dice Loss
         patch_size = getattr(args, 'patch_size', 32)  # 默认patch_size=32
@@ -133,23 +137,6 @@ def compute_loss(outputs, labels, args):
         # 组合损失（可调整权重系数）
         combined_loss = loss_dice + loss_ce  # 简单相加
         return combined_loss
-    elif args.loss_func == 'dice_plus_MPatchDice':
-        # 计算Patch Dice Loss
-        Patch_dice = MultiScalePatchDiceLoss().to(args.device)
-        loss_dice = Patch_dice(outputs, labels)
-
-        # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
-
-        # 组合损失（可调整权重系数）
-        combined_loss = loss_dice + loss_ce  # 简单相加
-        return combined_loss
-
-
     elif args.loss_func == 'multi_scale_patch_dice':
         # 多尺度Patch Dice Loss
         patch_sizes = getattr(args, 'patch_sizes', [16, 32, 64])
@@ -159,7 +146,6 @@ def compute_loss(outputs, labels, args):
         ).to(args.device)
         loss = multi_dice(outputs, labels)
         return loss
-
     elif args.loss_func == 'multi_scale_patch_dice_plus_ce':
         # 多尺度Patch Dice + CE
         patch_sizes = getattr(args, 'patch_sizes', [16, 32, 64])
@@ -226,7 +212,7 @@ def compute_loss(outputs, labels, args):
         total_loss = loss_seg + smooth_lambda * loss_smooth_3d
 
         return total_loss
-    if args.loss_func == 'dice_plus_cldice':
+    elif args.loss_func == 'dice_plus_cldice':
 
         # 快速模式：减少clDice计算开销
         fast_mode = getattr(args, 'fast_mode', True)  # 默认启用快速模式
@@ -281,7 +267,6 @@ def compute_loss(outputs, labels, args):
                 f"Loss components - Dice: {loss_dice.item():.4f}, clDice: {loss_cldice.item():.4f}, Combined: {combined_loss.item():.4f}")
 
         return combined_loss
-
     elif args.loss_func == 'dice_plus_topo':
         # 组合 Dice 损失和拓扑损失
         Patch_dice = DiceLoss().to(args.device)
@@ -312,7 +297,6 @@ def compute_loss(outputs, labels, args):
                 f"Loss components - Dice: {loss_dice.item():.4f}, Topo: {loss_topo.item():.4f}, Combined: {combined_loss.item():.4f}")
 
         return combined_loss
-
     elif args.loss_func == 'dice_ce_topo':
         # 组合 Dice + CE + 拓扑损失
         Patch_dice = DiceLoss().to(args.device)

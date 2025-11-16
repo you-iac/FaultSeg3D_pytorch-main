@@ -31,6 +31,164 @@ class DiceLoss(nn.Module):
         return loss
 
 
+import torch
+import torch.nn.functional as F
+
+
+def compute_multiscale_density_weights(
+        label,
+        scales=(8, 16, 32),
+        min_w=0.1
+):
+    """
+    label: (B, 1, D, H, W), binary tensor 0/1
+    return: W (B, D, H, W), voxel-level weight map
+    """
+    if label.dim() == 4:
+        label = label.unsqueeze(1)
+    elif label.dim() != 5:
+        raise ValueError(f"label 需要是4D或5D张量，当前维度: {label.dim()}")
+
+    B, _, D, H, W = label.shape
+    device = label.device
+
+    weight_maps = []
+
+    for s in scales:
+        # === 1) sum pooling: compute per-block soft counts ===
+        pool = F.avg_pool3d(label.float(), kernel_size=s, stride=s)  # (B,1,D/s,H/s,W/s)
+        # avg_pool outputs mean; convert to counts:
+        block_count = pool * (s ** 3)
+
+        # === 2) normalize to [min_w, 1] ===
+        max_c = block_count.max() + 1e-6
+        raw = block_count / max_c
+        w_block = min_w + (1 - min_w) * raw  # ensure nonzero weight
+
+        # === 3) upsample back to voxel resolution ===
+        w_voxel = F.interpolate(
+            w_block,
+            size=(D, H, W),
+            mode='nearest'
+        )  # (B,1,D,H,W)
+
+        weight_maps.append(w_voxel)
+
+    # === 4) sum over scales and normalize mean(W)=1 ===
+    W = torch.zeros_like(weight_maps[0])
+    n = len(weight_maps)
+
+    for w in weight_maps:
+        W += w
+
+    W = W / n  # scale average
+    W = W / (W.mean() + 1e-6)  # normalize global mean to 1
+
+    return W.squeeze(1)  # return (B, D, H, W)
+
+
+def weighted_cross_entropy(logits, labels, weight_map):
+    """
+    logits: (B, 2, D, H, W)
+    labels: (B, D, H, W), long
+    weight_map: (B, D, H, W)
+    """
+    ce = F.cross_entropy(logits, labels, reduction='none')  # (B,D,H,W)
+    loss = (ce * weight_map).mean()
+    return loss
+
+
+def compute_loss_multiscale_weighted(
+        logits,
+        label,
+        ce_weight=1.0,
+        dice_weight=1.0,
+        scales=(8, 16, 32),
+        min_w=0.1
+):
+    """
+    logits: (B, 2, D, H, W)
+    label:  (B, 1, D, H, W)
+    """
+    # prepare labels shape for CE
+    label_ce = label[:, 0].long()  # (B,D,H,W)
+
+    # === 1) compute voxel-level weights ===
+    W = compute_multiscale_density_weights(label, scales=scales, min_w=min_w)
+    # shape: (B,D,H,W)
+
+    # === 2) CE with voxel weights ===
+    loss_ce = weighted_cross_entropy(logits, label_ce, W)
+
+    # === 3) MultiScalePatchDice without weights ===
+    dice_loss_fn = MultiScalePatchDiceLoss()
+    loss_dice = dice_loss_fn(logits, label)  # unchanged
+
+    # === 4) combine ===
+    loss = ce_weight * loss_ce + dice_weight * loss_dice
+
+    return {
+        "loss": loss,
+        "ce": loss_ce,
+        "dice": loss_dice
+    }
+
+
+class WeightedCrossEntropyDiceLoss(nn.Module):
+    """
+    将多尺度密度加权交叉熵与标准Dice Loss整合为单个模块。
+
+    参数:
+        ce_weight: 交叉熵损失权重
+        dice_weight: Dice损失权重
+        scales: 计算密度权重的尺度列表
+        min_w: 密度权重的最小值
+        epsilon: DiceLoss的数值稳定项
+    """
+
+    def __init__(self,
+                 ce_weight=1.0,
+                 dice_weight=1.0,
+                 scales=(8, 16, 32),
+                 min_w=0.1,
+                 epsilon=1e-5):
+        super().__init__()
+        self.ce_weight = ce_weight
+        self.dice_weight = dice_weight
+        self.scales = scales
+        self.min_w = min_w
+        self.dice_loss = DiceLoss(epsilon=epsilon)
+
+    def forward(self, logits, label):
+        """
+        logits: (B, 2, D, H, W)
+        label:  (B, 1, D, H, W) 或 (B, D, H, W)
+        """
+        if label.dim() == 5 and label.size(1) == 1:
+            label_ce = label[:, 0].long()
+            label_for_weights = label
+        elif label.dim() == 4:
+            label_ce = label.long()
+            label_for_weights = label.unsqueeze(1)
+        else:
+            raise ValueError("label 张量需要是 (B,1,D,H,W) 或 (B,D,H,W) 形状")
+
+        weight_map = compute_multiscale_density_weights(
+            label_for_weights, scales=self.scales, min_w=self.min_w
+        )
+        loss_ce = weighted_cross_entropy(logits, label_ce, weight_map)
+        loss_dice = self.dice_loss(logits, label)
+
+        loss = self.ce_weight * loss_ce + self.dice_weight * loss_dice
+        # 方便调试：可在外部读取最近一次的各项损失
+        self.latest_components = {
+            "loss": loss.detach(),
+            "ce": loss_ce.detach(),
+            "dice": loss_dice.detach()
+        }
+        return loss
+
+
 class PatchDiceLoss(nn.Module):
     """
     分块Dice Loss - 自动支持2D和3D
