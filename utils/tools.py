@@ -133,6 +133,22 @@ def compute_loss(outputs, labels, args):
         # 组合损失（可调整权重系数）
         combined_loss = loss_dice + loss_ce  # 简单相加
         return combined_loss
+    elif args.loss_func == 'dice_plus_MPatchDice':
+        # 计算Patch Dice Loss
+        Patch_dice = MultiScalePatchDiceLoss().to(args.device)
+        loss_dice = Patch_dice(outputs, labels)
+
+        # 计算加权交叉熵损失
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+
+        # 组合损失（可调整权重系数）
+        combined_loss = loss_dice + loss_ce  # 简单相加
+        return combined_loss
+
 
     elif args.loss_func == 'multi_scale_patch_dice':
         # 多尺度Patch Dice Loss

@@ -18,18 +18,24 @@ from utils.tools import save_args_info
 def add_args():
     parser = argparse.ArgumentParser(description="FaultSeg3D_pytorch")
 
-    parser.add_argument("--exp", default="400_50_CEDNet_DCN", type=str, help="Name of each run")
+    parser.add_argument("--exp", default="400_50_Unet_MPatDice+BCE", type=str, help="Name of each run")
     parser.add_argument("--device", default='cuda:0', type=str, help="GPU id for training")
     parser.add_argument("--mode", default='train', choices=['train', 'valid_only', 'pred', 'pred_all'], type=str, help='network run mode')
-    parser.add_argument("--batch_size", default=2, type=int, help="number of batch size")
+    parser.add_argument("--batch_size", default=4, type=int, help="number of batch size")
     parser.add_argument("--batch_size_not_train", default=1, type=int, help="number of batch size when not training")
-    parser.add_argument("--epochs", default=100, type=int, help="max number of training epochs")
+    parser.add_argument("--epochs", default=50, type=int, help="max number of training epochs")
     parser.add_argument("--train_path", default="./data/data_3D_400/train/", type=str, help="dataset directory")
     parser.add_argument("--valid_path", default="./data/data_3D_400/valid/", type=str, help="dataset directory")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
     parser.add_argument("--out_channels", default=2, type=int, help="number of output channels")
-    parser.add_argument("--loss_func", default="dice_plus_ce", choices=['dice', 'cross_with_weight','dice_plus_ce', 'dice_ce_plus_smooth',
-                                                                                                                           'dice_plus_cldice', 'dice_plus_topo', 'dice_ce_topo'], type=str, help="choose loss function")
+    parser.add_argument("--loss_func", default="dice_plus_MPatchDice",
+                                                    choices=['dice',
+                                                             'cross_with_weight',
+                                                             'dice_plus_ce',
+                                                             'dice_plus_PatchDice',
+                                                             'dice_plus_MPatchDice',
+                                                             'dice_ce_plus_smooth',
+                                                             'dice_plus_cldice', 'dice_plus_topo', 'dice_ce_topo'], type=str, help="choose loss function")
     parser.add_argument("--val_every", default=10, type=int, help="validation frequency")
     parser.add_argument("--optim_lr", default=1e-4, type=float, help="optimization learning rate")
     parser.add_argument("--workers", default=0, type=int, help="number of workers")
