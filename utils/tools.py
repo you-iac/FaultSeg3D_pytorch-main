@@ -115,14 +115,34 @@ def compute_loss(outputs, labels, args):
         return loss
     elif args.loss_func == 'CE+MSD_MSELoss':
         "CE_plus_MultiScaleDensityMSELoss"
-        loss_dice = MultiScaleDensityMSELoss().to(args.device)
+        # 创建MultiScaleDensityMSELoss实例
+        criterion_mse = MultiScaleDensityMSELoss().to(args.device)
+        
+        # MultiScaleDensityMSELoss需要 (B, 1, D, H, W) 格式
+        # 从outputs中提取前景通道（索引1），并添加通道维度
+        if outputs.shape[1] == 2:
+            # outputs是 (B, 2, D, H, W)，提取前景通道并添加维度
+            pred_for_mse = outputs[:, 1:2, :, :, :]  # (B, 1, D, H, W)
+        else:
+            pred_for_mse = outputs  # 假设已经是 (B, 1, D, H, W)
+        
+        # 确保labels是 (B, 1, D, H, W) 格式
+        if labels.dim() == 4:
+            labels_for_mse = labels.unsqueeze(1)  # (B, D, H, W) -> (B, 1, D, H, W)
+        elif labels.dim() == 5 and labels.size(1) == 1:
+            labels_for_mse = labels  # 已经是 (B, 1, D, H, W)
+        else:
+            labels_for_mse = labels
+        
+        # 计算MultiScaleDensityMSELoss
+        loss_mse = criterion_mse(pred_for_mse, labels_for_mse)
 
         # 计算加权交叉熵损失
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
         loss_ce = criterion_ce(outputs, labels)
 
         # 组合损失（可调整权重系数）
-        combined_loss = loss_dice + loss_ce  # 简单相加
+        combined_loss = loss_mse + loss_ce  # 简单相加
         loss = combined_loss
         return loss
 

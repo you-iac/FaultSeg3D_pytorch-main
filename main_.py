@@ -28,7 +28,7 @@ def add_args():
     parser.add_argument("--valid_path", default="./data/data_3D_400/valid/", type=str, help="dataset directory")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
     parser.add_argument("--out_channels", default=2, type=int, help="number of output channels")
-    parser.add_argument("--loss_func", default="_D+MSDW_C",
+    parser.add_argument("--loss_func", default="CE+MSD_MSELoss",
                                                     choices=['dice',
                                                              'cross_with_weight',
                                                              'dice_plus_ce',
