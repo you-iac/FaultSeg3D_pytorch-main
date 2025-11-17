@@ -1,14 +1,12 @@
 import os
-import torch
 from dataloader.dataloader import FaultDataset
 from torch.utils.data import DataLoader
-import torch.nn as nn
 from sklearn.metrics import confusion_matrix
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss,WeightedCrossEntropyDiceLoss
+from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss,WeightedCrossEntropyDiceLoss,MultiScaleDensityMSELoss
 
 from .cldice import soft_cldice, soft_dice
 from .TopologicalLoss import TopologicalLoss
@@ -121,6 +119,22 @@ def compute_loss(outputs, labels, args):
         loss_dice = WeightedCrossEntropyDiceLoss().to(args.device)
         loss = loss_dice(outputs, labels)
         return loss
+    elif args.loss_func == 'CE+MSD_MSELoss':
+        "CE_plus_MultiScaleDensityMSELoss"
+        loss_dice = MultiScaleDensityMSELoss().to(args.device)
+
+        # 计算加权交叉熵损失
+        neg = (1 - labels).sum()
+        pos = labels.sum()
+        beta = neg / (neg + pos)
+        weight = torch.tensor([1 - beta, beta]).to(args.device)
+        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+
+        # 组合损失（可调整权重系数）
+        combined_loss = loss_dice + loss_ce  # 简单相加
+        loss = combined_loss
+        return loss
+
     elif args.loss_func == 'dice_plus_PatchDice':
         # 计算Patch Dice Loss
         patch_size = getattr(args, 'patch_size', 32)  # 默认patch_size=32
