@@ -709,6 +709,71 @@ class MultiScalePatchDiceLoss(nn.Module):
         return total_loss
 
 
+class WeightedCrossEntropyLoss(nn.Module):
+    """
+    自动计算类别权重的加权交叉熵损失
+    
+    根据标签中正负样本的比例自动计算权重，用于处理类别不平衡问题。
+    
+    参数:
+        reduction: 损失缩减方式，默认 'mean'
+    
+    使用示例:
+        criterion = WeightedCrossEntropyLoss().to(device)
+        loss = criterion(logits, labels)
+    """
+    
+    def __init__(self, reduction='mean'):
+        super().__init__()
+        self.reduction = reduction
+        self.ce_loss = nn.CrossEntropyLoss(reduction=reduction)
+    
+    def forward(self, logits, labels):
+        """
+        计算加权交叉熵损失
+        
+        参数:
+            logits: (B, C, D, H, W) 或 (B, C, H, W)，模型输出的logits
+            labels: (B, 1, D, H, W) 或 (B, D, H, W) 或 (B, H, W)，真实标签（0/1或类别索引）
+        
+        返回:
+            loss: 加权交叉熵损失值
+        """
+        # 处理labels的维度：如果是 (B, 1, D, H, W)，需要squeeze成 (B, D, H, W)
+        if labels.dim() == 5 and labels.size(1) == 1:
+            labels = labels.squeeze(1)  # (B, 1, D, H, W) -> (B, D, H, W)
+        elif labels.dim() == 4:
+            # (B, D, H, W) 或 (B, H, W)，保持不变
+            pass
+        else:
+            raise ValueError(f"labels 维度不正确: {labels.shape}，应该是 (B, 1, D, H, W) 或 (B, D, H, W) 或 (B, H, W)")
+        
+        # 确保labels是long类型
+        if labels.dtype != torch.long:
+            labels = labels.long()
+        
+        # 计算正负样本数量
+        neg = (1 - labels).sum()  # 背景类（0）的数量
+        pos = labels.sum()        # 前景类（1）的数量
+        
+        # 计算类别权重
+        total = neg + pos
+        if total > 0:
+            beta = neg / total
+            # 权重：[背景权重, 前景权重]
+            # 样本少的类别权重更大
+            weight = torch.tensor([1 - beta, beta], dtype=torch.float32, device=logits.device)
+        else:
+            # 如果总数为0，使用均匀权重
+            weight = torch.tensor([0.5, 0.5], dtype=torch.float32, device=logits.device)
+        
+        # 创建带权重的交叉熵损失
+        weighted_ce = nn.CrossEntropyLoss(weight=weight, reduction=self.reduction)
+        loss = weighted_ce(logits, labels)
+        
+        return loss
+
+
 class MultiScaleDensityMSELoss(nn.Module):
     """
     Multi-scale block-level density MSE loss.

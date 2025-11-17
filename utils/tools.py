@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss,WeightedCrossEntropyDiceLoss,MultiScaleDensityMSELoss
+from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss, MultiScaleDensityMSELoss, WeightedCrossEntropyLoss
 
 from .cldice import soft_cldice, soft_dice
 from .TopologicalLoss import TopologicalLoss
@@ -91,11 +91,8 @@ def compute_loss(outputs, labels, args):
         loss = criterion(outputs, labels)
         return loss
     elif args.loss_func == 'cross_with_weight':
-        neg = (1 - labels).sum()  # 算有多少个0
-        pos = labels.sum()  # 算有多少个1
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion = WeightedCrossEntropyLoss().to(args.device)
+        loss = criterion(outputs, labels)
         return loss
     elif args.loss_func == 'dice_plus_ce':
         # print("dice_plus_ce");
@@ -104,11 +101,8 @@ def compute_loss(outputs, labels, args):
         loss_dice = Patch_dice(outputs, labels)
 
         # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         # 组合损失（可调整权重系数）
         combined_loss = loss_dice + loss_ce  # 简单相加
@@ -124,11 +118,8 @@ def compute_loss(outputs, labels, args):
         loss_dice = MultiScaleDensityMSELoss().to(args.device)
 
         # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         # 组合损失（可调整权重系数）
         combined_loss = loss_dice + loss_ce  # 简单相加
@@ -142,11 +133,8 @@ def compute_loss(outputs, labels, args):
         loss_dice = Patch_dice(outputs, labels)
 
         # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         # 组合损失（可调整权重系数）
         combined_loss = loss_dice + loss_ce  # 简单相加
@@ -170,11 +158,8 @@ def compute_loss(outputs, labels, args):
         loss_dice = multi_dice(outputs, labels)
 
         # 计算加权交叉熵损失
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         combined_loss = loss_dice + loss_ce
         return combined_loss
@@ -184,15 +169,9 @@ def compute_loss(outputs, labels, args):
         Patch_dice = DiceLoss().to(args.device)
         loss_dice = Patch_dice(outputs, labels)
 
-        # 计算权重
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        # 假设是二分类，权重为 [背景权重, 前景权重]
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-
-        # CrossEntropyLoss 的输入是 logits (outputs)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        # 计算加权交叉熵损失
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         loss_seg = loss_dice + loss_ce
 
@@ -315,15 +294,10 @@ def compute_loss(outputs, labels, args):
         # 组合 Dice + CE + 拓扑损失
         Patch_dice = DiceLoss().to(args.device)
 
-        # 计算权重
-        neg = (1 - labels).sum()
-        pos = labels.sum()
-        beta = neg / (neg + pos)
-        weight = torch.tensor([1 - beta, beta]).to(args.device)
-
         # 计算各种损失
         loss_dice = Patch_dice(outputs, labels)
-        loss_ce = nn.CrossEntropyLoss(weight=weight, reduction='mean')(outputs, labels.long())
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
 
         # 拓扑损失参数
         lambda_topo = getattr(args, 'lambda_topo', 0.05)  # 较小的拓扑权重
