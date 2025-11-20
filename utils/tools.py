@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss, MultiScaleDensityMSELoss, WeightedCrossEntropyLoss
+from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss, MultiScaleDensityMSELoss, WeightedCrossEntropyLoss,MultiScaleDensityLoss
+
 
 from .cldice import soft_cldice, soft_dice
 from .TopologicalLoss import TopologicalLoss
@@ -108,6 +109,18 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
+    elif args.loss_func == 'dice_plus_MSDLoss':
+        "多尺度密度权重"
+        criterion = DiceLoss().to(args.device)
+        loss_dice = criterion(outputs, labels)
+
+        criterion_dce = MultiScaleDensityLoss().to(args.device)
+        loss_dict = criterion_dce(outputs, labels)
+        loss_dce = loss_dict["loss"]  # 从字典中提取 loss
+
+        loss = loss_dice + loss_dce
+        return loss
+
     elif args.loss_func == '_D+MSDW_C':
         "dice_plus_MultiscaleDensityWeights"
         loss_dice = WeightedCrossEntropyDiceLoss().to(args.device)
@@ -115,6 +128,7 @@ def compute_loss(outputs, labels, args):
         return loss
     elif args.loss_func == 'CE+MSD_MSELoss':
         "CE_plus_MultiScaleDensityMSELoss"
+        # 对比标签与预测密度的差
         # 创建MultiScaleDensityMSELoss实例
         criterion_mse = MultiScaleDensityMSELoss().to(args.device)
         

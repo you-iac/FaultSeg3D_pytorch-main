@@ -504,6 +504,102 @@ class MultiScalePatchDiceLoss(nn.Module):
         return total_loss
 
 
+class MultiScaleDensityLoss(nn.Module):
+    """
+    基于多尺度密度的加权 Loss。
+    不再计算不稳定的分形斜率，而是直接计算多尺度下的局部密度。
+    密度越高（如断层交叉点、密集带），权重越大。
+    """
+
+    def __init__(self,
+                 scales=(3, 5, 9, 17),  # 不同大小的感受野
+                 min_w=1.0,  # 背景/稀疏区域的权重
+                 max_w=5.0,  # 最密集区域（如交叉点）的权重
+                 normalize_mean=True):  # 保持总 Loss 数值量级不变
+        super().__init__()
+        # 确保存储为 list 避免 pytorch 注册问题，且都为奇数
+        self.scales = [s for s in scales if s % 2 == 1]
+        self.min_w = min_w
+        self.max_w = max_w
+        self.normalize_mean = normalize_mean
+
+        print(f"Initialized Multi-Scale Density Weighting with scales: {self.scales}")
+
+    def compute_density_map(self, mask):
+        """
+        计算多尺度密度平均图。
+        mask: (B, 1, D, H, W) 0/1 标签
+        """
+        density_accum = 0.0
+
+        for s in self.scales:
+            # AvgPool3d 计算的就是局部窗口内的 "密度" (0.0 ~ 1.0)
+            # padding=s//2 保证输出尺寸不变且中心对齐
+            pad = s // 2
+            local_density = F.avg_pool3d(
+                mask,
+                kernel_size=s,
+                stride=1,
+                padding=pad
+            )
+            # 累加不同尺度的密度
+            density_accum += local_density
+
+        # 取平均，得到综合密度图 (0.0 ~ 1.0)
+        # 这里的含义是：该像素在不同尺度下，周围平均有多少比例是断层
+        avg_density = density_accum / len(self.scales)
+
+        return avg_density
+
+    def density_to_weight(self, density):
+        """
+        将密度 (0~1) 映射为权重 (min_w ~ max_w)
+        """
+        # 线性映射：密度越大，权重越大
+        # density 为 0 (纯背景) -> min_w
+        # density 为 1 (纯实心体) -> max_w
+        W = self.min_w + (self.max_w - self.min_w) * density
+
+        # 可选：对权重进行归一化，使得 batch 内的平均权重为 1
+        # 这样可以保证调整 max_w 时，Learning Rate 不需要大幅调整
+        if self.normalize_mean:
+            # 避免除以 0
+            mean_w = W.mean().view(1, 1, 1, 1, 1)
+            W = W / (mean_w + 1e-8)
+
+        return W
+
+    def forward(self, logits, label):
+        # label: (B, D, H, W) -> (B, 1, D, H, W)
+        if label.dim() == 4:
+            mask = label.unsqueeze(1).float()
+        else:
+            mask = label.float()
+
+        # 1. 计算多尺度密度 (B, 1, D, H, W)
+        # 无需复杂的斜率回归，直接看周围有多少断层
+        density = self.compute_density_map(mask)
+
+        # 2. 映射为权重 (B, 1, D, H, W)
+        weights = self.density_to_weight(density)
+
+        # 3. 加权 CrossEntropy
+        # 需要 squeeze 掉 channel 维以匹配 CE 的 target 要求
+        loss_fn = nn.CrossEntropyLoss(reduction='none')
+        ce_loss = loss_fn(logits, label.long().squeeze(1) if label.dim() == 5 else label.long())
+
+        # weights 需要 squeeze 掉 channel 维: (B, 1, D, H, W) -> (B, D, H, W)
+        weights_squeezed = weights.squeeze(1)
+
+        weighted_loss = (ce_loss * weights_squeezed).mean()
+
+        return {
+            "loss": weighted_loss,
+            "density": density.detach().squeeze(1),  # 方便可视化
+            "weights": weights_squeezed.detach()
+        }
+
+
 # ===== 测试代码 =====
 if __name__ == '__main__':
     print("=" * 70)
