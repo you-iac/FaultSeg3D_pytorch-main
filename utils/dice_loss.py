@@ -523,7 +523,6 @@ class MultiScaleDensityLoss(nn.Module):
         self.max_w = max_w
         self.normalize_mean = normalize_mean
 
-        print(f"Initialized Multi-Scale Density Weighting with scales: {self.scales}")
 
     def compute_density_map(self, mask):
         """

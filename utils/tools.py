@@ -113,7 +113,7 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
-    elif args.loss_func == 'dice_plus_MSDLoss':
+    elif args.loss_func == 'dice_plus_多尺度密度权重':
         "多尺度密度权重,使用不同窗口计算像素密度"
         criterion = DiceLoss().to(args.device)
         loss_dice = criterion(outputs, labels)
