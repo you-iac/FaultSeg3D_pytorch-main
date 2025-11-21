@@ -929,6 +929,267 @@ class MultiScaleDensityMSELoss(nn.Module):
 
         return sum(losses)
 
+class LocalFractalSlopeWeightedCELoss(nn.Module):
+    """
+    对每个 voxel 在局部 L³ 窗口内按 scales=[2,4,8,16...] 计算 block-counts，
+    在 log(scale) vs log(count) 上做线性回归，得到斜率 s(x) 作为"局部分形指数"。
+    将 s(x) 线性/归一化到 [min_w, max_w] 并标准化 mean(W)=1，作为 per-voxel 权重用于 CE。
+
+    核心方法：
+        1. 对每个像素，固定选取16³区域（像素在索引8位置，左右各8个voxel）
+        2. 在这个固定区域内，不同尺度的block划分完全对齐（16能被2、4、8、16整除）
+        3. 使用max_pool3d划分blocks，统计包含断层的block数量
+        4. 计算分形斜率，转换为权重
+
+    使用情形（训练时基于 label 计算权重）：
+        logits: (B, 2, D, H, W)  二分类 logits
+        label:  (B, 1, D, H, W)  {0,1} 或 (B,D,H,W) long
+
+    主要参数：
+        L: local window side length (int), e.g. 16
+        scales: list of ints, each must be <= L and typically powers of two, e.g. [2,4,8,16]
+        min_w: 最小权重（防止为0），例如 0.1
+        max_w: 最大权重（可选 clipping）
+        use_label_for_weights: True -> 基于 ground-truth label 计算权重（训练常用）
+                              False -> 基于 model probs 计算（可用于在线/推理自适应）
+        eps: 数值稳定小量
+        normalize_mean: 是否把最终 W 缩放到 mean(W)=1
+    """
+
+    def __init__(self,
+                 L=16,
+                 scales=(2, 4, 8, 16),
+                 min_w=0.1,
+                 max_w=2.0,
+                 use_label_for_weights=True,
+                 eps=1e-6,
+                 normalize_mean=True,
+                 sigmoid_on_logits=True):
+        super().__init__()
+        assert all(s <= L for s in scales), "每个 scale 必须 <= L"
+        assert L % 2 == 0, "L 必须是偶数，以便像素可以大致居中"
+        self.L = L
+        self.scales = list(scales)
+        self.min_w = float(min_w)
+        self.max_w = float(max_w) if max_w is not None else None
+        self.use_label_for_weights = bool(use_label_for_weights)
+        self.eps = eps
+        self.normalize_mean = bool(normalize_mean)
+        self.sigmoid_on_logits = bool(sigmoid_on_logits)
+
+        # precompute x-related regression constants (x = log(scale))
+        x = torch.tensor([float(torch.log(torch.tensor(float(s)))) for s in self.scales], dtype=torch.float32)
+        self.register_buffer('_x', x)  # shape (S,)
+        self.register_buffer('_x_mean', x.mean())  # scalar
+        self.register_buffer('_xx_sum', (x * x).sum())  # scalar
+        # for slope formula denom: sum(x^2) - n*x_mean^2
+        self._den = (self._xx_sum - len(self.scales) * (self._x_mean ** 2)).item()
+        if abs(self._den) < 1e-8:
+            raise ValueError("scales produce degenerate regression denominator")
+
+    def compute_local_counts(self, map_tensor):
+        """
+        对每个voxel的L³邻域，按不同尺度划分blocks，统计每个尺度下有多少个blocks包含至少1个断层voxel。
+
+        方法：
+        1. 对每个像素，固定选取16³区域（像素在索引8位置，左右各8个voxel）
+        2. 在这个固定区域内，使用max_pool3d划分不同尺度的blocks
+        3. 统计每个尺度下包含断层的block数量
+
+        map_tensor: (B,1,D,H,W) floats (label 0/1 or pred prob)
+        returns counts: (B, S, D, H, W) where S = len(scales)
+        each entry is the number of blocks containing at least 1 fault voxel
+        in the L³ neighborhood at that scale
+        """
+        B, C, D, H, W = map_tensor.shape
+        window_size = self.L  # 固定窗口大小，应该是16
+        counts = []
+
+        for s in self.scales:
+            block_size = s
+            # 步骤1: 将volume划分成block_size³的blocks，计算每个block是否包含断层
+            # 所有尺度都从(0,0,0)开始划分，确保对齐
+            block_presence = F.max_pool3d(
+                map_tensor,
+                kernel_size=block_size,
+                stride=block_size,
+                padding=0
+            )  # (B,1,D//block_size, H//block_size, W//block_size)，值是0或1
+
+            # 步骤2: 插值回原始尺寸，使每个block内的所有voxel都有相同的值
+            block_presence_up = F.interpolate(
+                block_presence,
+                size=(D, H, W),
+                mode='nearest'
+            )  # (B,1,D,H,W)
+
+            # 步骤3: 对每个voxel，统计其window_size³邻域内有多少个blocks包含断层
+            # block_presence_up的值是0或1（表示该voxel所在的block是否包含断层）
+            # 注意：同一个block内的所有voxel都有相同的值，所以需要特殊处理
+            # 方法：对window_size³邻域求和，得到包含断层的voxel总数
+            # 然后除以每个block的voxel数，得到包含断层的block数
+            pad = window_size // 2  # pad=8，确保像素在window的中心（索引8位置）
+            sum_presence = F.avg_pool3d(
+                block_presence_up,
+                kernel_size=window_size,
+                stride=1,
+                padding=pad
+            ) * (window_size ** 3)  # (B,1,D,H,W)，每个位置的值表示其window_size³邻域内包含断层的voxel总数
+
+            # 转换为block count：包含断层的voxel数 / 每个block的voxel数 = 包含断层的block数
+            # 注意：由于同一个block内的所有voxel值相同，所以需要除以block_size³
+            voxels_per_block = block_size ** 3
+            block_count = sum_presence / (voxels_per_block + 1e-8)
+
+            # 裁剪到原始尺寸（处理偶数window_size的情况）
+            _, _, D_out, H_out, W_out = block_count.shape
+            if (D_out != D) or (H_out != H) or (W_out != W):
+                d_extra = max(0, D_out - D)
+                h_extra = max(0, H_out - H)
+                w_extra = max(0, W_out - W)
+                if d_extra > 0:
+                    d0 = d_extra // 2
+                    block_count = block_count[:, :, d0:d0 + D, :, :]
+                    _, _, D_out, _, _ = block_count.shape
+                if h_extra > 0:
+                    h0 = h_extra // 2
+                    block_count = block_count[:, :, :, h0:h0 + H, :]
+                    _, _, _, H_out, _ = block_count.shape
+                if w_extra > 0:
+                    w0 = w_extra // 2
+                    block_count = block_count[:, :, :, :, w0:w0 + W]
+
+            counts.append(block_count)
+
+        # stack scales dim: list of (B,1,D,H,W) -> (B,S,1,D,H,W)
+        counts = torch.stack(counts, dim=1)  # (B,S,1,D,H,W)
+        counts = counts.squeeze(2)  # -> (B,S,D,H,W)
+        return counts
+
+    def compute_slope_map(self, counts):
+        """
+        counts: (B, S, D, H, W)  (soft counts >=0)
+        returns slope_map: (B, D, H, W)
+        regression: slope = ( sum((x - xm)*(y - ym)) ) / denom
+        where y = log(count + eps), x = log(scale)
+
+        当所有count都为0或接近0时，斜率设为0，避免数值误差导致的异常值。
+        """
+        B, S, D, H, W = counts.shape
+        device = counts.device
+
+        # 检测所有count是否都为0或接近0
+        count_threshold = 0.5  # 如果所有count都 < 0.5，认为四舍五入后为0
+        all_counts_near_zero = (counts < count_threshold).all(dim=1)  # (B, D, H, W)
+
+        # 如果所有count都接近0，直接返回0
+        if all_counts_near_zero.all():
+            return torch.zeros((B, D, H, W), device=device, dtype=counts.dtype)
+
+        # 对于有有效count的voxel，进行正常计算
+        x = self._x.to(device)  # (S,)
+        xm = self._x_mean.to(device).float()  # scalar
+
+        # y = log(counts + eps)
+        y = torch.log(counts + self.eps)  # (B,S,D,H,W)
+
+        # compute sums over scales
+        sum_xy = (x.view(1, S, 1, 1, 1) * y).sum(dim=1)  # (B,D,H,W)
+        sum_y = y.sum(dim=1)  # (B,D,H,W)
+        n = float(S)
+        # numerator = sum_xy - n * xm * y_mean = sum_xy - xm * sum_y
+        numer = sum_xy - xm * sum_y
+        # denom is scalar precomputed = sum(x^2) - n*xm^2
+        denom = self._den
+        slope = numer / (denom + 1e-12)  # (B,D,H,W)
+
+        # 验证：分形斜率理论上应该 <= 0（随着scale增大，count应该减少或不变）
+        # 如果出现 > 0 的情况，说明计算有误，将其设为0
+
+        # 当所有count都接近0时，斜率设为0（处理部分voxel的情况）
+        slope = torch.where(all_counts_near_zero, torch.zeros_like(slope), slope)
+
+        # 检查并修正异常的正斜率（理论上不应该出现，可能是计算误差）
+        # 分形几何中，随着尺度增大，block数量应该减少，所以斜率应该 <= 0
+        positive_slope_mask = slope > 1e-6  # 任何正斜率都视为异常（允许小的数值误差）
+        if positive_slope_mask.any():
+            # 对于异常的正斜率，将其设为0
+            slope = torch.where(positive_slope_mask, torch.zeros_like(slope), slope)
+
+        return slope
+
+    def slope_to_weight(self, slope):
+        """
+        将 slope 映射成权重 W，做缩放与下限保护，并 optional clip 上限，再 normalize mean=1。
+        注意：这里反转了映射，使得原来斜率大的权重小，斜率小的权重大。
+        slope: (B,D,H,W)
+        """
+        B = slope.shape[0]
+        Wout = torch.empty_like(slope)
+        for b in range(B):
+            s_b = slope[b]  # (D,H,W)
+            flat = s_b.view(-1)
+            # compute 1st and 99th percentiles
+            k1 = max(1, int(0.01 * flat.numel()))
+            k99 = max(1, int(0.99 * flat.numel()))
+            low = torch.kthvalue(flat, k1).values
+            high = torch.kthvalue(flat, k99).values
+            # avoid degenerate
+            if (high - low).abs() < 1e-6:
+                raw = (s_b - low) * 0.0 + 0.5  # fallback to 0.5
+            else:
+                raw = (s_b - low) / (high - low)
+            # 反转映射：斜率大的权重小
+            raw_inverted = 1.0 - raw
+            # map to [min_w, max_w]
+            w = self.min_w + (1.0 - self.min_w) * raw_inverted
+            if self.max_w is not None:
+                w = torch.clamp(w, min=self.min_w, max=self.max_w)
+            Wout[b] = w
+        # optionally normalize mean=1 per batch
+        if self.normalize_mean:
+            mean_per_batch = Wout.view(B, -1).mean(dim=1).view(B, 1, 1, 1)
+            Wout = Wout / (mean_per_batch + 1e-12)
+        return Wout  # (B,D,H,W)
+
+    def forward(self, logits, label):
+        """
+        logits: (B,2,D,H,W)
+        label:  (B,1,D,H,W) or (B,D,H,W)
+        返回 dict: { 'loss': scalar, 'ce': scalar, 'weights': (B,D,H,W), 'slope': (B,D,H,W) }
+        """
+        # prepare label and map source for counts
+        if label.dim() == 4:
+            label = label.unsqueeze(1)
+        label = label.float()
+
+        if self.use_label_for_weights:
+            map_tensor = label  # use ground truth (0/1)
+        else:
+            probs = torch.sigmoid(logits[:, 1:2, ...]) if self.sigmoid_on_logits else logits[:, 1:2, ...]
+            map_tensor = probs
+
+        # 1) compute counts for each scale: shape (B, S, D, H, W)
+        counts = self.compute_local_counts(map_tensor)
+
+        # 2) compute slope map (B,D,H,W)
+        slope = self.compute_slope_map(counts)
+
+        # 3) slope -> weight map
+        W = self.slope_to_weight(slope)  # (B,D,H,W)
+
+        # 4) weighted CE: per-voxel
+        labels_ce = label[:, 0].long()  # (B,D,H,W)
+        ce = F.cross_entropy(logits, labels_ce, reduction='none')  # (B,D,H,W)
+        loss_ce = (ce * W).mean()
+
+        return {
+            'loss': loss_ce,
+            'ce': loss_ce,
+            'weights': W.detach(),
+            'slope': slope.detach()
+        }
+
 
 # ===== 测试代码 =====
 if __name__ == '__main__':

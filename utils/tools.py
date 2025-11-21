@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from utils.dice_loss import DiceLoss, PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss, MultiScaleDensityMSELoss, WeightedCrossEntropyLoss,MultiScaleDensityLoss
+from utils.dice_loss import (DiceLoss,
+                             PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss,
+                             MultiScaleDensityMSELoss, WeightedCrossEntropyLoss,MultiScaleDensityLoss,
+                             LocalFractalSlopeWeightedCELoss
+                             )
 
 
 from .cldice import soft_cldice, soft_dice
@@ -110,7 +114,7 @@ def compute_loss(outputs, labels, args):
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
     elif args.loss_func == 'dice_plus_MSDLoss':
-        "多尺度密度权重"
+        "多尺度密度权重,使用不同窗口计算像素密度"
         criterion = DiceLoss().to(args.device)
         loss_dice = criterion(outputs, labels)
 
@@ -120,7 +124,22 @@ def compute_loss(outputs, labels, args):
 
         loss = loss_dice + loss_dce
         return loss
+    elif args.loss_func == 'dice_plus_分型比较':
+        "分型比较"
+        criterion = DiceLoss().to(args.device)
+        loss_dice = criterion(outputs, labels)
 
+        criterion_dce = LocalFractalSlopeWeightedCELoss(
+            L=16,
+            scales=(2, 4, 8, 16),
+            use_label_for_weights=True,  # 训练时用label，推理时可以用False
+            normalize_mean=True
+        ).to(args.device)
+        loss_dict = criterion_dce(outputs, labels)
+        loss_dce = loss_dict["loss"]   # 从字典中提取 loss
+
+        loss = loss_dice + loss_dce
+        return loss
     elif args.loss_func == '_D+MSDW_C':
         "dice_plus_MultiscaleDensityWeights"
         loss_dice = WeightedCrossEntropyDiceLoss().to(args.device)
