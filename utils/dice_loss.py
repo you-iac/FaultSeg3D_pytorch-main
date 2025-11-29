@@ -928,17 +928,19 @@ class MultiScaleDensityMSELoss(nn.Module):
 
         return sum(losses)
 
+
 class LocalFractalSlopeWeightedCELoss(nn.Module):
     """
     对每个 voxel 在局部 L³ 窗口内按 scales=[2,4,8,16...] 计算 block-counts，
     在 log(scale) vs log(count) 上做线性回归，得到斜率 s(x) 作为"局部分形指数"。
-    将 s(x) 线性/归一化到 [min_w, max_w] 并标准化 mean(W)=1，作为 per-voxel 权重用于 CE。
+    将 s(x) 通过多种非线性函数映射到 [min_w, max_w] 并标准化 mean(W)=1，作为 per-voxel 权重用于 CE。
 
     核心方法：
         1. 对每个像素，固定选取16³区域（像素在索引8位置，左右各8个voxel）
         2. 在这个固定区域内，不同尺度的block划分完全对齐（16能被2、4、8、16整除）
         3. 使用max_pool3d划分blocks，统计包含断层的block数量
-        4. 计算分形斜率，转换为权重
+        4. 计算分形斜率（负数，断层密集区域绝对值更大）
+        5. 取绝对值并使用非线性函数映射为权重（断层密集区域权重更大）
 
     使用情形（训练时基于 label 计算权重）：
         logits: (B, 2, D, H, W)  二分类 logits
@@ -953,6 +955,32 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
                               False -> 基于 model probs 计算（可用于在线/推理自适应）
         eps: 数值稳定小量
         normalize_mean: 是否把最终 W 缩放到 mean(W)=1
+
+    新增参数（权重映射增强）：
+        use_background_fractal: bool, 是否在非断层区域也使用分形斜率
+            - True: 非断层区域也计算分形斜率，可能获得中等权重
+            - False: 非断层区域分形斜率强制为0，权重设为min_w（更严格）
+        weight_mapping: str, 权重映射函数类型
+            - 'linear': 线性映射，断层密集区域权重线性增加
+            - 'power': 幂函数映射，断层密集区域权重被放大（推荐，exponent=2.0）
+            - 'sigmoid': Sigmoid映射，平滑过渡，适合中等密度区域
+            - 'tanh': Tanh映射，类似sigmoid但范围更广
+            - 'exp': 指数映射，强烈增强密集区域（可能过于极端）
+            - 'sqrt': 平方根映射，减弱密集区域（反向，不推荐）
+        power_exponent: float, 幂函数的指数（仅当weight_mapping='power'时使用）
+            - > 1: 增强密集区域（推荐 2.0-3.0）
+            - = 1: 等同于线性
+            - < 1: 减弱密集区域
+        sigmoid_steepness: float, Sigmoid/Tanh的陡峭度（仅当weight_mapping='sigmoid'或'tanh'时使用）
+            - 值越大，过渡越陡峭（推荐 3.0-10.0）
+
+    权重映射原理：
+        分形斜率是负数，断层密集区域斜率绝对值大（更负）
+        1. 取绝对值：|slope|，使得断层密集区域值更大
+        2. 归一化到 [0, 1]
+        3. 应用非线性函数增强密集区域
+        4. 映射到 [min_w, max_w]
+        结果：断层密集区域权重高，背景区域权重低
     """
 
     def __init__(self,
@@ -963,10 +991,30 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
                  use_label_for_weights=True,
                  eps=1e-6,
                  normalize_mean=True,
-                 sigmoid_on_logits=True):
+                 sigmoid_on_logits=True,
+                 use_background_fractal=True,
+                 weight_mapping='power',
+                 power_exponent=2.0,
+                 sigmoid_steepness=5.0):
+        """
+        新增参数：
+            use_background_fractal: bool, 是否在非断层区域也使用分形斜率（True=使用，False=非断层区域权重设为min_w）
+            weight_mapping: str, 权重映射函数类型
+                - 'linear': 线性映射
+                - 'power': 幂函数映射 (slope绝对值越大权重越大)
+                - 'sigmoid': Sigmoid映射
+                - 'tanh': Tanh映射
+                - 'exp': 指数映射
+                - 'sqrt': 平方根映射
+            power_exponent: float, 幂函数的指数（仅当weight_mapping='power'时使用）
+            sigmoid_steepness: float, Sigmoid的陡峭度（仅当weight_mapping='sigmoid'时使用）
+        """
         super().__init__()
         assert all(s <= L for s in scales), "每个 scale 必须 <= L"
         assert L % 2 == 0, "L 必须是偶数，以便像素可以大致居中"
+        assert weight_mapping in ['linear', 'power', 'sigmoid', 'tanh', 'exp', 'sqrt'], \
+            f"weight_mapping 必须是 ['linear', 'power', 'sigmoid', 'tanh', 'exp', 'sqrt'] 之一"
+
         self.L = L
         self.scales = list(scales)
         self.min_w = float(min_w)
@@ -975,6 +1023,10 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
         self.eps = eps
         self.normalize_mean = bool(normalize_mean)
         self.sigmoid_on_logits = bool(sigmoid_on_logits)
+        self.use_background_fractal = bool(use_background_fractal)
+        self.weight_mapping = str(weight_mapping)
+        self.power_exponent = float(power_exponent)
+        self.sigmoid_steepness = float(sigmoid_steepness)
 
         # precompute x-related regression constants (x = log(scale))
         x = torch.tensor([float(torch.log(torch.tensor(float(s)))) for s in self.scales], dtype=torch.float32)
@@ -1065,9 +1117,10 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
         counts = counts.squeeze(2)  # -> (B,S,D,H,W)
         return counts
 
-    def compute_slope_map(self, counts):
+    def compute_slope_map(self, counts, map_tensor=None):
         """
         counts: (B, S, D, H, W)  (soft counts >=0)
+        map_tensor: (B, 1, D, H, W) 可选，用于判断断层/背景区域
         returns slope_map: (B, D, H, W)
         regression: slope = ( sum((x - xm)*(y - ym)) ) / denom
         where y = log(count + eps), x = log(scale)
@@ -1115,40 +1168,108 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
             # 对于异常的正斜率，将其设为0
             slope = torch.where(positive_slope_mask, torch.zeros_like(slope), slope)
 
+        # ★★★ 新增：根据 use_background_fractal 决定是否保留非断层区域的分形斜率 ★★★
+        if map_tensor is not None and not self.use_background_fractal:
+            # 如果 use_background_fractal=False，非断层区域的分形斜率设为0
+            # 这样在后续权重映射时，非断层区域会得到最小权重
+            background_mask = (map_tensor.squeeze(1) <= 0.5).float()  # 背景区域mask
+            slope = slope * (1.0 - background_mask)  # 背景区域斜率设为0
+
         return slope
 
     def slope_to_weight(self, slope):
         """
-        将 slope 映射成权重 W，做缩放与下限保护，并 optional clip 上限，再 normalize mean=1。
-        注意：这里反转了映射，使得原来斜率大的权重小，斜率小的权重大。
-        slope: (B,D,H,W)
+        将 slope 映射成权重 W，使用多种非线性函数。
+
+        核心逻辑：
+        1. 分形斜率是负数，断层密集区域斜率绝对值大（更负）
+        2. 取绝对值：|slope|，使得断层密集区域值更大
+        3. 使用非线性函数增强密集区域的权重
+        4. 映射到 [min_w, max_w] 范围
+
+        slope: (B,D,H,W) - 负数，断层密集区域更负（绝对值更大）
+        returns: (B,D,H,W) - 权重，断层密集区域权重更大
         """
         B = slope.shape[0]
         Wout = torch.empty_like(slope)
+
         for b in range(B):
             s_b = slope[b]  # (D,H,W)
-            flat = s_b.view(-1)
-            # compute 1st and 99th percentiles
+
+            # ★★★ 步骤1: 将负数斜率转换为正数（取绝对值）★★★
+            # 分形斜率是负数，断层密集区域绝对值更大
+            s_abs = torch.abs(s_b)  # (D,H,W) - 绝对值，断层密集区域值更大
+
+            # ★★★ 步骤2: 归一化到 [0, 1] 范围 ★★★
+            flat = s_abs.view(-1)
+
+            # 使用百分位数避免异常值影响
             k1 = max(1, int(0.01 * flat.numel()))
             k99 = max(1, int(0.99 * flat.numel()))
             low = torch.kthvalue(flat, k1).values
             high = torch.kthvalue(flat, k99).values
-            # avoid degenerate
+
+            # 避免退化情况
             if (high - low).abs() < 1e-6:
-                raw = (s_b - low) * 0.0 + 0.5  # fallback to 0.5
+                raw = torch.ones_like(s_abs) * 0.5  # fallback to 0.5
             else:
-                raw = (s_b - low) / (high - low)
-            # 反转映射：斜率大的权重小
-            raw_inverted = 1.0 - raw
-            # map to [min_w, max_w]
-            w = self.min_w + (1.0 - self.min_w) * raw_inverted
+                raw = (s_abs - low) / (high - low + 1e-8)  # 归一化到 [0, 1]
+                raw = torch.clamp(raw, 0.0, 1.0)  # 确保在 [0, 1]
+
+            # ★★★ 步骤3: 应用非线性映射函数 ★★★
+            if self.weight_mapping == 'linear':
+                # 线性映射：直接使用归一化值
+                mapped = raw
+
+            elif self.weight_mapping == 'power':
+                # 幂函数映射：raw^exponent，增强密集区域
+                # exponent > 1 时，密集区域权重被放大
+                mapped = torch.pow(raw + 1e-8, self.power_exponent)
+
+            elif self.weight_mapping == 'sigmoid':
+                # Sigmoid映射：增强中等密度区域，平滑过渡
+                # 将 [0,1] 映射到更陡峭的曲线
+                centered = (raw - 0.5) * self.sigmoid_steepness
+                mapped = torch.sigmoid(centered)
+
+            elif self.weight_mapping == 'tanh':
+                # Tanh映射：类似sigmoid但范围是[-1,1]，需要转换
+                centered = (raw - 0.5) * self.sigmoid_steepness
+                mapped = (torch.tanh(centered) + 1.0) / 2.0  # 转换到 [0, 1]
+
+            elif self.weight_mapping == 'exp':
+                # 指数映射：强烈增强密集区域
+                # exp(raw * alpha) 然后归一化
+                alpha = 2.0  # 控制指数增长速度
+                exp_raw = torch.exp(raw * alpha)
+                exp_min = torch.exp(torch.tensor(0.0))
+                exp_max = torch.exp(torch.tensor(alpha))
+                mapped = (exp_raw - exp_min) / (exp_max - exp_min + 1e-8)
+
+            elif self.weight_mapping == 'sqrt':
+                # 平方根映射：减弱密集区域，增强稀疏区域（反向）
+                # 但这里我们希望密集区域权重大，所以用 1 - sqrt(1-raw)
+                mapped = 1.0 - torch.sqrt(1.0 - raw + 1e-8)
+
+            else:
+                raise ValueError(f"未知的 weight_mapping: {self.weight_mapping}")
+
+            # ★★★ 步骤4: 映射到权重范围 [min_w, max_w] ★★★
+            # 断层密集区域（mapped接近1）→ 接近 max_w
+            # 背景区域（mapped接近0）→ 接近 min_w
+            w = self.min_w + (self.max_w - self.min_w) * mapped
+
+            # 裁剪到指定范围
             if self.max_w is not None:
                 w = torch.clamp(w, min=self.min_w, max=self.max_w)
+
             Wout[b] = w
-        # optionally normalize mean=1 per batch
+
+        # ★★★ 步骤5: 可选的平均值归一化 ★★★
         if self.normalize_mean:
             mean_per_batch = Wout.view(B, -1).mean(dim=1).view(B, 1, 1, 1)
             Wout = Wout / (mean_per_batch + 1e-12)
+
         return Wout  # (B,D,H,W)
 
     def forward(self, logits, label):
@@ -1172,7 +1293,8 @@ class LocalFractalSlopeWeightedCELoss(nn.Module):
         counts = self.compute_local_counts(map_tensor)
 
         # 2) compute slope map (B,D,H,W)
-        slope = self.compute_slope_map(counts)
+        # 传递 map_tensor 用于判断是否使用非断层区域的分形
+        slope = self.compute_slope_map(counts, map_tensor=map_tensor)
 
         # 3) slope -> weight map
         W = self.slope_to_weight(slope)  # (B,D,H,W)
