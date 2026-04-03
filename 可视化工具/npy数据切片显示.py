@@ -46,7 +46,7 @@ if __name__ == '__main__':
     #这里设置每隔多少个像素才进行切片
     #--------------------------
 
-    __step = 16
+    __step = 2
 
     #显示第一个维度
     with tqdm(total=data.shape[0]) as pbar:
@@ -60,7 +60,7 @@ if __name__ == '__main__':
 
         #读取Times
         # 预计算固定尺寸（假设所有切片尺寸相同）
-        fig_width = data.shape[2] / 20 + 2      # +2 的目的是显示times刻度
+        fig_width = data.shape[2] / 20      # +2 的目的是显示times刻度
         fig_height = data.shape[1] / 20
 
         for i in range(0, data.shape[0], __step):
@@ -78,7 +78,7 @@ if __name__ == '__main__':
     with tqdm(total=data.shape[1]) as pbar:
         pbar.set_description('Processing:')
 
-        fig_width = data.shape[2] / 20 + 2      # +2 的目的是显示times刻度
+        fig_width = data.shape[2] / 20      # +2 的目的是显示times刻度
         fig_height = data.shape[0] / 20
         ###########   Y
         for i in range(0, data.shape[1], __step):
@@ -92,8 +92,8 @@ if __name__ == '__main__':
 
 
     with tqdm(total=data.shape[2]) as pbar:
-        fig_width = data.shape[1] / 20 + 2      # +2 的目的是显示times刻度
-        fig_height = data.shape[0] / 20 + 2
+        fig_width = data.shape[1] / 20       # +2 的目的是显示times刻度
+        fig_height = data.shape[0] / 20
         ###########   Y
         for i in range(0, data.shape[2], __step):
             fig = plt.figure(figsize=(fig_width, fig_height))

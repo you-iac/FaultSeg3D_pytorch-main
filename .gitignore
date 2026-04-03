@@ -3,3 +3,8 @@ data/
 .idea/
 *.npy
 /EXP/*/results/valid/picture/
+*.png
+*.svg
+
+main.py
+__pycache__
