@@ -3,6 +3,9 @@ data/
 .idea/
 *.npy
 /EXP/*/results/valid/picture/
+
+*.png
+
 *.png
 *.svg
 
