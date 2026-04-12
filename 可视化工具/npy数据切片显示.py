@@ -46,7 +46,7 @@ if __name__ == '__main__':
     #这里设置每隔多少个像素才进行切片
     #--------------------------
 
-    __step = 2
+    __step = 20
 
     #显示第一个维度
     with tqdm(total=data.shape[0]) as pbar:

@@ -8,3 +8,15 @@ data/
 
 main.py
 __pycache__
+main.py
+*.csv
+
+models/faultseg3d.py
+
+
+.vscode
+/EXP/001_400_50_Unet_dice_plus_ce
+/EXP/002_400_50_HRNet3D_48
+/EXP
+faultseg3d.py
+
