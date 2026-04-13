@@ -1347,3 +1347,82 @@ if __name__ == '__main__':
     print("\n" + "=" * 70)
     print("✅ 所有测试通过！")
     print("=" * 70)
+
+def compute_fractal_map(volume, scales=(2, 4, 8), softness=8.0, eps=1e-6):
+    """
+    Differentiable multi-scale fractal proxy map.
+
+    Args:
+        volume: [B,1,D,H,W] or [B,D,H,W]
+        scales: pooling scales for soft box-counting approximation
+        softness: controls soft occupancy sharpness
+        eps: numerical stability term
+
+    Returns:
+        fd_map: [B,1,D,H,W]
+    """
+    if volume.dim() == 4:
+        volume = volume.unsqueeze(1)
+    if volume.dim() != 5:
+        raise ValueError(f"compute_fractal_map expects 4D/5D tensor, got {tuple(volume.shape)}")
+
+    if volume.size(1) > 1:
+        volume = volume[:, 1:2, ...]
+
+    volume = volume.float()
+    b, _, d, h, w = volume.shape
+
+    valid_scales = [int(s) for s in scales if int(s) >= 1 and int(s) <= min(d, h, w)]
+    if len(valid_scales) == 0:
+        valid_scales = [1]
+
+    multiscale_soft_counts = []
+    for s in valid_scales:
+        if s == 1:
+            pooled = volume
+        else:
+            pooled = F.avg_pool3d(volume, kernel_size=s, stride=s)
+            pooled = F.interpolate(pooled, size=(d, h, w), mode='trilinear', align_corners=False)
+
+        # soft occupancy surrogate, avoids hard threshold and stays differentiable
+        soft_count = 1.0 - torch.exp(-softness * pooled)
+        multiscale_soft_counts.append(soft_count)
+
+    counts = torch.stack(multiscale_soft_counts, dim=1).squeeze(2)  # [B,S,D,H,W]
+    log_counts = torch.log(counts + eps)
+
+    log_scales = torch.log(
+        torch.tensor(valid_scales, dtype=volume.dtype, device=volume.device)
+    ).view(1, -1, 1, 1, 1)
+
+    if log_scales.size(1) == 1:
+        # degenerate single-scale case
+        return log_counts[:, 0:1, ...] * 0.0
+
+    x_centered = log_scales - log_scales.mean(dim=1, keepdim=True)
+    y_centered = log_counts - log_counts.mean(dim=1, keepdim=True)
+
+    cov = (x_centered * y_centered).sum(dim=1)
+    var = (x_centered * x_centered).sum(dim=1).clamp_min(eps)
+    slope = cov / var
+
+    fd_map = (-slope).unsqueeze(1)
+    return fd_map
+
+
+class FractalConsistencyLoss(nn.Module):
+    """Consistency loss between fractal maps."""
+
+    def __init__(self, loss_type='smooth_l1'):
+        super().__init__()
+        if str(loss_type).lower() == 'l1':
+            self.loss_fn = nn.L1Loss()
+        else:
+            self.loss_fn = nn.SmoothL1Loss()
+
+    def forward(self, fd_pred, fd_gt):
+        if fd_pred.shape != fd_gt.shape:
+            raise ValueError(
+                f"FractalConsistencyLoss shape mismatch: {tuple(fd_pred.shape)} vs {tuple(fd_gt.shape)}"
+            )
+        return self.loss_fn(fd_pred, fd_gt)

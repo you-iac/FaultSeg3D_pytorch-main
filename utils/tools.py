@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 from utils.dice_loss import (DiceLoss,
                              PatchDiceLoss, MultiScalePatchDiceLoss, WeightedCrossEntropyDiceLoss,
                              MultiScaleDensityMSELoss, WeightedCrossEntropyLoss,MultiScaleDensityLoss,
-                             LocalFractalSlopeWeightedCELoss
+                             LocalFractalSlopeWeightedCELoss, FractalConsistencyLoss, compute_fractal_map
                              )
 
 
@@ -113,6 +113,83 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
+    elif args.loss_func == 'fractal_consistency_loss':
+        # base segmentation losses
+        criterion_dice = DiceLoss().to(args.device)
+        dice_loss = criterion_dice(outputs, labels)
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        ce_loss = criterion_ce(outputs, labels)
+
+        # lambda_fd scheduling:
+        # epoch 1-10: 0
+        # epoch 11-20: linear ramp to lambda_fd_base
+        # epoch >20: lambda_fd_base
+        lambda_fd_base = float(getattr(args, 'lambda_fd', 0.1))
+        warmup_zero_epochs = int(getattr(args, 'fd_warmup_zero_epochs', 10))
+        warmup_full_epoch = int(getattr(args, 'fd_warmup_full_epoch', 20))
+        current_epoch = int(getattr(args, 'current_epoch', 0))
+        if current_epoch <= 0:
+            # fallback (e.g., valid_only mode without epoch context)
+            lambda_fd = lambda_fd_base
+        elif current_epoch <= warmup_zero_epochs:
+            lambda_fd = 0.0
+        elif current_epoch >= warmup_full_epoch:
+            lambda_fd = lambda_fd_base
+        else:
+            ramp_span = max(1, warmup_full_epoch - warmup_zero_epochs)
+            ramp_progress = (current_epoch - warmup_zero_epochs) / float(ramp_span)
+            lambda_fd = lambda_fd_base * ramp_progress
+
+        # scales: prefer config if available, fallback to [1,2,4]
+        fd_scales = getattr(args, 'fd_scales', (1, 2, 4))
+        if isinstance(fd_scales, str):
+            fd_scales = tuple(int(s.strip()) for s in fd_scales.split(',') if s.strip())
+        else:
+            fd_scales = tuple(int(s) for s in fd_scales)
+        if len(fd_scales) == 0:
+            fd_scales = (1, 2, 4)
+
+        # adapt outputs shape for potential [C,B,D,H,W]
+        if outputs.dim() != 5:
+            raise ValueError(f"fractal_consistency_loss expects 5D outputs, got {tuple(outputs.shape)}")
+        outputs_for_fd = outputs
+        if labels.dim() >= 4 and outputs.size(0) != labels.size(0) and outputs.size(1) == labels.size(0):
+            outputs_for_fd = outputs.permute(1, 0, 2, 3, 4).contiguous()
+
+        pred_raw = outputs_for_fd[:, 1:2, ...] if outputs_for_fd.size(1) > 1 else outputs_for_fd
+        with torch.no_grad():
+            pred_min = float(pred_raw.min().item())
+            pred_max = float(pred_raw.max().item())
+        # if logits -> sigmoid; if already probability map -> keep as is
+        pred_prob = torch.sigmoid(pred_raw) if (pred_min < 0.0 or pred_max > 1.0) else pred_raw
+
+        if labels.dim() == 4:
+            labels_for_fd = labels.unsqueeze(1).float()
+        elif labels.dim() == 5 and labels.size(1) == 1:
+            labels_for_fd = labels.float()
+        elif labels.dim() == 5 and labels.size(1) > 1:
+            labels_for_fd = labels[:, 1:2, ...].float()
+        else:
+            raise ValueError(f"Unsupported labels shape for fractal_consistency_loss: {tuple(labels.shape)}")
+
+        fd_pred = compute_fractal_map(pred_prob, scales=fd_scales)
+        fd_gt = compute_fractal_map(labels_for_fd, scales=fd_scales)
+        fd_loss_type = getattr(args, 'fd_loss_type', 'smooth_l1')
+        fd_criterion = FractalConsistencyLoss(loss_type=fd_loss_type).to(args.device)
+        fd_loss = fd_criterion(fd_pred, fd_gt)
+
+        # debug print (can comment out during long training)
+        print(
+            f"[fractal_consistency_loss] "
+            f"epoch={current_epoch}, "
+            f"lambda_fd={lambda_fd:.6f}, "
+            f"dice_loss={dice_loss.item():.6f}, "
+            f"ce_loss={ce_loss.item():.6f}, "
+            f"fd_loss={fd_loss.item():.6f}"
+        )
+
+        total_loss = dice_loss + ce_loss + lambda_fd * fd_loss
+        return total_loss
     elif args.loss_func == 'dice_plus_多尺度密度权重':
         "多尺度密度权重,使用不同窗口计算像素密度"
         criterion = DiceLoss().to(args.device)

@@ -56,6 +56,8 @@ def train(args):
     time = 0
 
     for epoch in range(args.epochs):
+        # 1-based epoch index for loss scheduling
+        args.current_epoch = epoch + 1
 
         model.train()
         # 训练模式
