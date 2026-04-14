@@ -28,7 +28,7 @@ if __name__ == "__main__":
 
     nodes = cigvis.create_slices(
         x,
-        pos=[[55], [85], [0]],
+        pos=[[55], [85], [340]],
         cmap="Petrel",
     )
     nodes += cigvis.create_colorbar_from_nodes(
@@ -36,7 +36,7 @@ if __name__ == "__main__":
         "Amplitude",
         select="slices",
     )
-    
+
     cigvis.plot3D(
         nodes,
         size=(700, 600),
