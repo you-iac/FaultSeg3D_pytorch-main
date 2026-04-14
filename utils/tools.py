@@ -525,14 +525,18 @@ def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
 
     for i in range(len(inputs)):
 
-        seg = segs[i].argmax(axis=1)
+        # seg = segs[i].argmax(axis=1)
+        # 做概率的分布图，所以不进行argmax
+        seg = segs[i][:, 1, :, :, :]
+
+        
         img = inputs[i]
         gt = gts[i]
         seg = np.squeeze(seg)
         img = np.squeeze(img)
         gt = np.squeeze(gt)
         # save output
-        np.save(result_path + '/numpy/' + str(i) + '_seg.npy', seg)
+        np.save(result_path + '/numpy/' + str(i) + '_seg.npy', seg.astype(np.float32))
         np.save(result_path + '/numpy/' + str(i) + '_img.npy', img)
         np.save(result_path + '/numpy/' + str(i) + '_gt.npy', gt)
         # save picture

@@ -1,107 +1,106 @@
 import matplotlib
-matplotlib.use('Agg')  # 使用非交互式后端
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import numpy as np
 import tkinter as tk
 from tkinter import filedialog
 import os
-import time
 from tqdm import tqdm
 
 
-
-
-
-
-#弹出窗口返回选择的文件绝对路径
 def select_file():
-    # 创建Tkinter根窗口并隐藏
     root = tk.Tk()
-    root.withdraw()  # 隐藏主窗口
-
-    # 弹出文件选择对话框
+    root.withdraw()
     file_path = filedialog.askopenfilename(
-        title="选择文件",  # 对话框标题
-        filetypes=[("所有文件", "*.*")]  # 可选文件类型过滤
+        title='Select .npy file',
+        filetypes=[('NumPy files', '*.npy'), ('All files', '*.*')]
     )
-
-    # 关闭Tkinter窗口
     root.destroy()
+    return file_path if file_path else None
 
-    return file_path if file_path else None  # 返回路径，取消选择则返回None
+
+def get_imshow_params(data: np.ndarray):
+    finite = data[np.isfinite(data)]
+    if finite.size == 0:
+        raise ValueError('No valid values in data (all NaN/Inf).')
+
+    dmin = float(finite.min())
+    dmax = float(finite.max())
+
+    # Binary mask: keep black/white display.
+    unique_vals = np.unique(finite)
+    is_binary = unique_vals.size <= 2 and np.all(np.isin(unique_vals, [0.0, 1.0]))
+    if is_binary:
+        return {'cmap': 'gray', 'vmin': 0.0, 'vmax': 1.0}
+
+    # Probability map [0, 1]: use gamma enhancement for low-probability details.
+    is_probability = (dmin >= -1e-6) and (dmax <= 1.0 + 1e-6)
+    if is_probability:
+        return {'cmap': 'turbo', 'norm': mcolors.PowerNorm(gamma=0.6, vmin=0.0, vmax=1.0)}
+
+    # General amplitude data: percentile stretch for robust contrast.
+    vmin, vmax = np.percentile(finite, [1, 99])
+    if vmax <= vmin:
+        if dmax > dmin:
+            vmin, vmax = dmin, dmax
+        else:
+            vmin, vmax = dmin - 1e-6, dmax + 1e-6
+
+    cmap = 'seismic' if (dmin < 0 and dmax > 0) else 'gray'
+    return {'cmap': cmap, 'vmin': float(vmin), 'vmax': float(vmax)}
+
+
+def save_slice_image(slice_data: np.ndarray, save_path: str, fig_width: float, fig_height: float, imshow_params: dict):
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    plt.imshow(slice_data, aspect=1, interpolation='nearest', **imshow_params)
+    plt.axis('off')
+    plt.savefig(save_path, dpi=200)
+    plt.close(fig)
+
+
 if __name__ == '__main__':
-    #读取文件
-    filename = os.path.splitext(select_file())[0]
+    selected_path = select_file()
+    if selected_path is None:
+        print('No file selected, exit.')
+        raise SystemExit(0)
 
-    data = np.load(filename+".npy")
-    print(data.shape) #[Time, x, y ]
+    data = np.load(selected_path)
+    filename = os.path.splitext(selected_path)[0]
 
+    print('shape:', data.shape)
+    print('range:', float(np.nanmin(data)), '~', float(np.nanmax(data)))
 
+    os.makedirs(filename, exist_ok=True)
 
-    if os.path.exists(filename+'/') :
-        print("dir exists")
-    else:
-        os.makedirs(filename + '/')
-    #---------------------------
-    #这里设置每隔多少个像素才进行切片
-    #--------------------------
+    # Save one slice every N indices.
+    step = 20
+    imshow_params = get_imshow_params(data)
 
-    __step = 20
+    # dim0 -> T-i
+    dim0_indices = list(range(0, data.shape[0], step))
+    with tqdm(total=len(dim0_indices), desc='Processing dim0') as pbar:
+        fig_width = max(2.0, data.shape[2] / 20.0)
+        fig_height = max(2.0, data.shape[1] / 20.0)
+        for i in dim0_indices:
+            save_slice_image(data[i, :, :], f'{filename}/T-{i}.png', fig_width, fig_height, imshow_params)
+            pbar.update(1)
 
-    #显示第一个维度
-    with tqdm(total=data.shape[0]) as pbar:
-        pbar.set_description('Processing:')
-        # total表示总的项目, 循环的次数20*10(每次更新数目) = 200(total)
-        # for i in range(20):
-        #     # 进行动作, 这里是过0.1s
-        #     time.sleep(0.1)
-        #     # 进行进度更新, 这里设置10个
-        #     pbar.update(__step)
+    # dim1 -> X-i
+    dim1_indices = list(range(0, data.shape[1], step))
+    with tqdm(total=len(dim1_indices), desc='Processing dim1') as pbar:
+        fig_width = max(2.0, data.shape[2] / 20.0)
+        fig_height = max(2.0, data.shape[0] / 20.0)
+        for i in dim1_indices:
+            save_slice_image(data[:, i, :], f'{filename}/X-{i}.png', fig_width, fig_height, imshow_params)
+            pbar.update(1)
 
-        #读取Times
-        # 预计算固定尺寸（假设所有切片尺寸相同）
-        fig_width = data.shape[2] / 20      # +2 的目的是显示times刻度
-        fig_height = data.shape[1] / 20
-
-        for i in range(0, data.shape[0], __step):
-            # 创建新Figure并显式关闭
-            fig = plt.figure(figsize=(fig_width, fig_height))
-            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-            plt.imshow(data[i, :, :], vmin=-0.01, vmax=0.01, aspect=1)
-
-            plt.savefig(f'{filename}/T-{i}.png')
-            plt.close(fig)  # 明确关闭Figure释放内存
-            pbar.update(__step)
-
-
-
-    with tqdm(total=data.shape[1]) as pbar:
-        pbar.set_description('Processing:')
-
-        fig_width = data.shape[2] / 20      # +2 的目的是显示times刻度
-        fig_height = data.shape[0] / 20
-        ###########   Y
-        for i in range(0, data.shape[1], __step):
-            fig = plt.figure(figsize=(fig_width, fig_height))
-            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-            plt.imshow(data[:,i,:], vmin=-0.01, vmax=0.01, aspect=1)
-            plt.savefig(f'{filename}/X-{i}.png')
-            plt.close(fig)  # 明确关闭Figure释放内存
-            pbar.update(__step)
-
-
-
-    with tqdm(total=data.shape[2]) as pbar:
-        fig_width = data.shape[1] / 20       # +2 的目的是显示times刻度
-        fig_height = data.shape[0] / 20
-        ###########   Y
-        for i in range(0, data.shape[2], __step):
-            fig = plt.figure(figsize=(fig_width, fig_height))
-            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
-            plt.imshow(data[:,:,i], vmin=-0.01, vmax=0.01, aspect=1)
-            plt.savefig(f'{filename}/Y-{i}.png')
-            plt.close(fig)  # 明确关闭Figure释放内存
-            pbar.update(__step)
-
-
-
+    # dim2 -> Y-i
+    dim2_indices = list(range(0, data.shape[2], step))
+    with tqdm(total=len(dim2_indices), desc='Processing dim2') as pbar:
+        fig_width = max(2.0, data.shape[1] / 20.0)
+        fig_height = max(2.0, data.shape[0] / 20.0)
+        for i in dim2_indices:
+            save_slice_image(data[:, :, i], f'{filename}/Y-{i}.png', fig_width, fig_height, imshow_params)
+            pbar.update(1)

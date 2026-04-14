@@ -105,8 +105,13 @@ def pred_Gaussian(args):
     output_data = sliding_window_prediction(input_data, block_size, overlap, model, args)
 
     threshold = args.threshold
-    output_data[output_data > threshold] = 1
-    output_data[output_data <= threshold] = 0
+    if threshold > 0:
+        output_data[output_data > threshold] = 1
+        output_data[output_data <= threshold] = 0
+        output_data = output_data.astype(np.int8)
+        print("---Start Save results int 8 ······")
+    else:
+        output_data = np.clip(output_data, 0.0, 1.0)
 
     print("---Start Save results  ······")
     save_path = './EXP/' + args.exp + '/results/pred/' + args.pred_data_name + '/'
@@ -135,8 +140,11 @@ def prediction_all(args):
     output_data = prediction(model,input_data,args.device)
 
     threshold = args.threshold
-    output_data[output_data > threshold] = 1
-    output_data[output_data <= threshold] = 0
+    if threshold > 0:
+        output_data[output_data > threshold] = 1
+        output_data[output_data <= threshold] = 0
+    else:
+        output_data = np.clip(output_data, 0.0, 1.0)
 
     print("---Start Save results  ······")
     save_path = './EXP/' + args.exp + '/results/pred/' + args.pred_data_name + '/'
@@ -168,6 +176,5 @@ def prediction(model, data, device):
     with torch.no_grad():
         result = model(input_tensor).cpu().numpy()[0, 0, :m1, :m2, :m3]
     return result
-
 
 
