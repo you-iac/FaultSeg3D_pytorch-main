@@ -11,6 +11,7 @@ from utils.dice_loss import (DiceLoss,
                              MultiScaleDensityMSELoss, WeightedCrossEntropyLoss,MultiScaleDensityLoss,
                              LocalFractalSlopeWeightedCELoss, FractalConsistencyLoss, compute_fractal_map
                              )
+from utils.loss.connectivity_loss import ConnectivityLoss
 
 
 from .cldice import soft_cldice, soft_dice
@@ -113,6 +114,64 @@ def compute_loss(outputs, labels, args):
         combined_loss = loss_dice + loss_ce  # 简单相加
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
+    elif args.loss_func == 'ConnectivityLoss':
+        criterion_conn  = ConnectivityLoss().to(args.device)
+        loss_conn  = criterion_conn (pred_prob=outputs, target=labels)
+
+        criterion_dice = DiceLoss().to(args.device)
+        loss_dice = criterion_dice(outputs, labels)
+
+        criterion_ce = WeightedCrossEntropyLoss().to(args.device)
+        loss_ce = criterion_ce(outputs, labels)
+
+
+        current_epoch = int(getattr(args, 'current_epoch', 0))
+
+        alpha = 0.1
+
+        if current_epoch <= 10:
+            alpha = 0.0
+        elif current_epoch <= 20:
+            alpha = (current_epoch - 10) / 100.0
+        else:
+            alpha = 0.1
+        # 组合损失
+        
+        combined_loss = loss_dice + loss_ce + alpha * loss_conn
+
+        conn_stats = getattr(criterion_conn, "latest_stats", None)
+        if conn_stats is None:
+            total_edges = 0.0
+            z_loss = float("nan")
+            y_loss = float("nan")
+            x_loss = float("nan")
+            z_edges = 0.0
+            y_edges = 0.0
+            x_edges = 0.0
+        else:
+            direction_losses = conn_stats.get("direction_losses", {})
+            direction_edges = conn_stats.get("direction_edge_counts", {})
+            total_edges = float(conn_stats.get("total_edge_count", 0.0))
+            z_loss = float(direction_losses.get("z", float("nan")))
+            y_loss = float(direction_losses.get("y", float("nan")))
+            x_loss = float(direction_losses.get("x", float("nan")))
+            z_edges = float(direction_edges.get("z", 0.0))
+            y_edges = float(direction_edges.get("y", 0.0))
+            x_edges = float(direction_edges.get("x", 0.0))
+
+        print(
+            f"[ConnLoss] "
+            # f"epoch={current_epoch}, "
+            f"lambda_conn={alpha:.6f}, "
+            f"dice_loss={loss_dice.item():.6f}, "
+            f"ce_loss={loss_ce.item():.6f}, "
+            f"conn_loss={loss_conn.item():.6f}, "
+            f"mask.sum(total_edges)={total_edges:.1f}, "
+            f"z_loss={z_loss:.6f}, y_loss={y_loss:.6f}, x_loss={x_loss:.6f}, "
+            f"z_edges={z_edges:.1f}, y_edges={y_edges:.1f}, x_edges={x_edges:.1f}"
+        )
+        
+        return combined_loss
     elif args.loss_func == 'fractal_consistency_loss':
         # base segmentation losses
         criterion_dice = DiceLoss().to(args.device)
@@ -176,7 +235,7 @@ def compute_loss(outputs, labels, args):
         fd_gt = compute_fractal_map(labels_for_fd, scales=fd_scales)
         fd_loss_type = getattr(args, 'fd_loss_type', 'smooth_l1')
         fd_criterion = FractalConsistencyLoss(loss_type=fd_loss_type).to(args.device)
-        fd_loss = fd_criterion(fd_pred, fd_gt)
+        fd_loss = fd_criterion(fd_pred, fd_gt, target=labels)
 
         # debug print (can comment out during long training)
         print(
@@ -559,7 +618,7 @@ def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
             plt.axis('off')
             plt.title('Segmentation')
 
-            plt.savefig(result_path + '/picture/No_' + str(i) + '_idx_' + str(idx) + '_dim_0.png')
+            plt.savefig(result_path + '/picture/No_' + str(i) +'_dim_0' + '_idx_' + str(idx) + '.png')
             plt.close()
             # dim 1
             plt.subplot(1, 3, 1)
@@ -577,7 +636,7 @@ def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
             plt.axis('off')
             plt.title('Segmentation')
 
-            plt.savefig(result_path + '/picture/No_' + str(i) + '_idx_' + str(idx) + '_dim_1.png')
+            plt.savefig(result_path + '/picture/No_' + str(i) +'_dim_1'+ '_idx_' + str(idx) + '.png')
             plt.close()
             # dim 2
             plt.subplot(1, 3, 1)
@@ -595,7 +654,7 @@ def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
             plt.axis('off')
             plt.title('Segmentation')
 
-            plt.savefig(result_path + '/picture/No_' + str(i) + '_idx_' + str(idx) + '_dim_2.png')
+            plt.savefig(result_path + '/picture/No_' + str(i) + '_dim_2' + '_idx_' + str(idx) + '.png')
             plt.close()
 
 
