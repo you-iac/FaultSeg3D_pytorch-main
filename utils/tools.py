@@ -1,4 +1,5 @@
 import os
+import datetime
 from dataloader.dataloader import FaultDataset
 from torch.utils.data import DataLoader
 from sklearn.metrics import confusion_matrix
@@ -159,7 +160,7 @@ def compute_loss(outputs, labels, args):
             y_edges = float(direction_edges.get("y", 0.0))
             x_edges = float(direction_edges.get("x", 0.0))
 
-        print(
+        conn_log = (
             f"[ConnLoss] "
             # f"epoch={current_epoch}, "
             f"lambda_conn={alpha:.6f}, "
@@ -170,6 +171,14 @@ def compute_loss(outputs, labels, args):
             f"z_loss={z_loss:.6f}, y_loss={y_loss:.6f}, x_loss={x_loss:.6f}, "
             f"z_edges={z_edges:.1f}, y_edges={y_edges:.1f}, x_edges={x_edges:.1f}"
         )
+        print(conn_log)
+        exp_name = getattr(args, 'exp', None)
+        if exp_name:
+            log_dir = os.path.join('.', 'EXP', str(exp_name))
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir)
+            with open(os.path.join(log_dir, 'log.txt'), 'a', encoding='utf-8') as f:
+                f.write(str(datetime.datetime.today()) + ' : ' + conn_log + '\n')
         
         return combined_loss
     elif args.loss_func == 'fractal_consistency_loss':
