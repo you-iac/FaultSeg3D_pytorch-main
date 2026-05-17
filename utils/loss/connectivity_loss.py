@@ -18,7 +18,7 @@ class ConnectivityLoss(nn.Module):
 
     def __init__(
         self,
-        mask_kernel: int = 5,
+        mask_kernel: int = 3,
         offsets: Sequence[Offset3D] = DEFAULT_OFFSETS_6N,
         loss_type: str = "smooth_l1",
         eps: float = 1e-6,

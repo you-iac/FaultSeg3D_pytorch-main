@@ -9998,3 +9998,6 @@
 2025-10-30 17:50:48.627908 : epoch: 49 Times:9997
 2025-10-30 17:50:49.262200 : epoch: 49 Times:9998
 2025-10-30 17:50:49.881943 : epoch: 49 Times:9999
+2026-05-06 18:42:10.825619 : [ConnLoss] lambda_conn=0.000000, dice_loss=0.864737, ce_loss=0.765313, conn_loss=0.194741, mask.sum(total_edges)=2155039.0, z_loss=0.195412, y_loss=0.191522, x_loss=0.197288, z_edges=758327.0, y_edges=672575.0, x_edges=724137.0
+2026-05-06 18:42:39.377515 : epoch: 0 Times:0
+2026-05-06 18:42:41.399165 : [ConnLoss] lambda_conn=0.000000, dice_loss=0.861107, ce_loss=0.810026, conn_loss=0.328263, mask.sum(total_edges)=2069943.0, z_loss=0.308776, y_loss=0.340743, x_loss=0.335272, z_edges=727977.0, y_edges=666074.0, x_edges=675892.0

@@ -28,7 +28,7 @@ if __name__ == "__main__":
 
     nodes = cigvis.create_slices(
         x,
-        pos=[[55], [85], [340]],
+        pos=[[0], [0], [0]],
         cmap="Petrel",
     )
     nodes += cigvis.create_colorbar_from_nodes(

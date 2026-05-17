@@ -18,7 +18,7 @@ from utils.tools import save_args_info
 def add_args():
     parser = argparse.ArgumentParser(description="FaultSeg3D_pytorch")
 
-    parser.add_argument("--exp", default="400_50_Test_10-50", type=str, help="Name of each run")
+    parser.add_argument("--exp", default="400_50_CEDNet", type=str, help="Name of each run")
     parser.add_argument("--device", default='cuda:0', type=str, help="GPU id for training")
     parser.add_argument("--mode", default='train', choices=['train', 'valid_only', 'pred', 'pred_all'], type=str, help='network run mode')
     parser.add_argument("--batch_size", default=2, type=int, help="number of batch size")
@@ -28,8 +28,8 @@ def add_args():
     parser.add_argument("--valid_path", default="./data/data_3D_400/valid/", type=str, help="dataset directory")
     parser.add_argument("--in_channels", default=1, type=int, help="number of input channels")
     parser.add_argument("--out_channels", default=2, type=int, help="number of output channels")
-    parser.add_argument("--loss_func", default="fractal_consistency_loss",
-                                                    choices=['dice',
+    parser.add_argument("--loss_func", default="ConnectivityLoss",
+                                                    choices=['dice_plus_ce',
                                                              'cross_with_weight',
                                                              'dice_plus_ce',
                                                              '_D+MSDW_C',
@@ -38,7 +38,8 @@ def add_args():
                                                              'multi_scale_patch_dice_plus_ce',
                                                              'dice_ce_plus_smooth',
                                                              'dice_plus_cldice', 'dice_plus_topo', 'dice_ce_topo'
-                                                             'fractal_consistency_loss'
+                                                             'fractal_consistency_loss',
+                                                             'ConnectivityLoss'
                                                              ], type=str, help="choose loss function")
     parser.add_argument("--val_every", default=10, type=int, help="validation frequency")
     parser.add_argument("--optim_lr", default=1e-4, type=float, help="optimization learning rate")

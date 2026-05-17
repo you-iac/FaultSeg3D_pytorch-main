@@ -1413,16 +1413,77 @@ def compute_fractal_map(volume, scales=(2, 4, 8), softness=8.0, eps=1e-6):
 class FractalConsistencyLoss(nn.Module):
     """Consistency loss between fractal maps."""
 
-    def __init__(self, loss_type='smooth_l1'):
+    def __init__(self, loss_type='smooth_l1', neighborhood_kernel_size=9):
         super().__init__()
-        if str(loss_type).lower() == 'l1':
-            self.loss_fn = nn.L1Loss()
-        else:
-            self.loss_fn = nn.SmoothL1Loss()
+        self.loss_type = str(loss_type).lower()
+        if self.loss_type not in {'l1', 'smooth_l1'}:
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
+        self.neighborhood_kernel_size = int(neighborhood_kernel_size)
+        if self.neighborhood_kernel_size <= 0 or self.neighborhood_kernel_size % 2 == 0:
+            raise ValueError(
+                f"neighborhood_kernel_size must be positive odd integer, got {self.neighborhood_kernel_size}"
+            )
 
-    def forward(self, fd_pred, fd_gt):
+    def _prepare_target_fault_channel(self, target):
+        if target.dim() == 4:
+            target = target.unsqueeze(1)
+        elif target.dim() != 5:
+            raise ValueError(f"Unsupported target shape for FractalConsistencyLoss: {tuple(target.shape)}")
+
+        if target.size(1) > 1:
+            return target[:, 1:2, ...]
+        if target.size(1) == 1:
+            return target
+        raise ValueError(f"Invalid channel count for target: {target.size(1)}")
+
+    def _build_mask_from_target(self, target):
+        target_fault = self._prepare_target_fault_channel(target)
+        gt_bin = (target_fault.float() > 0.5).float()
+        pad = self.neighborhood_kernel_size // 2
+        mask_gt = F.max_pool3d(gt_bin, kernel_size=self.neighborhood_kernel_size, stride=1, padding=pad)
+        return mask_gt
+
+    @staticmethod
+    def _compute_pointwise_loss(loss_type, fd_pred, fd_gt):
+        if loss_type == 'l1':
+            return F.l1_loss(fd_pred, fd_gt, reduction='none')
+        return F.smooth_l1_loss(fd_pred, fd_gt, reduction='none')
+
+    def forward(self, fd_pred, fd_gt, target=None, mask=None):
         if fd_pred.shape != fd_gt.shape:
             raise ValueError(
                 f"FractalConsistencyLoss shape mismatch: {tuple(fd_pred.shape)} vs {tuple(fd_gt.shape)}"
             )
-        return self.loss_fn(fd_pred, fd_gt)
+
+        # backward-compatible fallback: full-map reduction when no mask/target is provided
+        if mask is None and target is None:
+            if self.loss_type == 'l1':
+                return F.l1_loss(fd_pred, fd_gt)
+            return F.smooth_l1_loss(fd_pred, fd_gt)
+
+        if mask is None:
+            # target branch does not need gradient
+            with torch.no_grad():
+                mask = self._build_mask_from_target(target)
+
+        if mask.dim() == 4:
+            mask = mask.unsqueeze(1)
+        elif mask.dim() != 5:
+            raise ValueError(f"Unsupported mask shape for FractalConsistencyLoss: {tuple(mask.shape)}")
+        if mask.size(1) > 1:
+            mask = mask[:, 1:2, ...]
+        if mask.shape != fd_pred.shape:
+            raise ValueError(
+                f"FractalConsistencyLoss mask shape mismatch: {tuple(mask.shape)} vs {tuple(fd_pred.shape)}"
+            )
+
+        pointwise_loss = self._compute_pointwise_loss(self.loss_type, fd_pred, fd_gt)
+
+        # mask only reweights/normalizes final loss; fd_pred gradient remains fully differentiable
+        mask = mask.to(device=fd_pred.device, dtype=fd_pred.dtype).detach()
+        masked_loss = pointwise_loss * mask
+        normalizer = mask.sum().clamp_min(1.0)
+        return masked_loss.sum() / normalizer
+
+
+
