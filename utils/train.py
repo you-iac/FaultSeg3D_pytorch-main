@@ -66,7 +66,7 @@ def train(args):
         train_dice = 0.0
 
         for step, data in enumerate(tqdm(train_loader, desc='[Train] Epoch' + str(epoch + 1) + '/' + str(args.epochs))):
-            inputs, labels = data['x'].to('cuda'), data['y'].to('cuda')
+            inputs, labels = data['x'].to(device), data['y'].to(device)
 
             optimizer.zero_grad()
 
@@ -93,8 +93,8 @@ def train(args):
 
         with torch.no_grad():
             for step, data in enumerate(tqdm(val_loader, desc='[VALID] Valid ')):
-                inputs = data['x'].to('cuda')
-                labels = data['y'].to('cuda')
+                inputs = data['x'].to(device)
+                labels = data['y'].to(device)
                 outputs = model(inputs)
                 loss = compute_loss(outputs, labels, args)
                 iou, dice, acc, pre = con_matrix(outputs, labels, args)
