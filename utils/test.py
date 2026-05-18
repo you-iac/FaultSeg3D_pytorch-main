@@ -1,4 +1,5 @@
 import os
+import importlib.util
 from utils.tools import save_pred_picture, load_pred_data
 from models.faultseg3d import FaultSeg3D
 import numpy as np
@@ -19,6 +20,29 @@ def normalization_tensor(data):
 
 def z_score(data):
     return (data - np.mean(data)) / np.std(data)
+
+
+def _load_slice_saver():
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script_path = os.path.join(project_root, '可视化工具', 'npy数据切片显示.py')
+    spec = importlib.util.spec_from_file_location('npy_slice_viewer', script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.save_volume_slices
+
+
+def save_prediction_slices(output_data, npy_path, save_path, step=20):
+    slice_dir = os.path.join(
+        save_path,
+        'slices',
+        os.path.splitext(os.path.basename(npy_path))[0],
+    )
+    try:
+        save_volume_slices = _load_slice_saver()
+        save_volume_slices(output_data, output_dir=slice_dir, step=step)
+        print("Saved prediction slices to:", slice_dir)
+    except Exception as exc:
+        print("Warning: failed to save prediction slices:", exc)
 
 
 
@@ -98,7 +122,7 @@ def pred_Gaussian(args):
     # 使用训练好的模型进行预测
     model = FaultSeg3D(args.in_channels, args.out_channels).to(args.device)
     model_path = './EXP/' + args.exp + '/models/' + args.pretrained_model_name
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, map_location=args.device))
     print("Loaded model from disk")
     model.eval()
     # 调用滑动窗口预测函数
@@ -119,7 +143,9 @@ def pred_Gaussian(args):
         os.makedirs(save_path + '/numpy/')
     if not os.path.exists(save_path + '/picture/'):
         os.makedirs(save_path + '/picture/')
-    np.save(save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy', output_data)
+    npy_path = save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy'
+    np.save(npy_path, output_data)
+    save_prediction_slices(output_data, npy_path, save_path)
 
     save_pred_picture(input_data, output_data, save_path + '/picture/', args.pred_data_name)
     print("Finish!!!")
@@ -133,7 +159,7 @@ def prediction_all(args):
     #加载模型
     model = FaultSeg3D(args.in_channels, args.out_channels).to(args.device)
     model_path = './EXP/' + args.exp + '/models/' + args.pretrained_model_name
-    model.load_state_dict(torch.load(model_path))
+    model.load_state_dict(torch.load(model_path, map_location=args.device))
 
     print("Loaded model from disk")
 
@@ -152,7 +178,9 @@ def prediction_all(args):
         os.makedirs(save_path + '/numpy/')
     if not os.path.exists(save_path + '/picture/'):
         os.makedirs(save_path + '/picture/')
-    np.save(save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy', output_data)
+    npy_path = save_path + '/numpy/' + args.pred_data_name +"_"+ args.exp + str(args.threshold) +'.npy'
+    np.save(npy_path, output_data)
+    save_prediction_slices(output_data, npy_path, save_path)
 
     save_pred_picture(input_data, output_data, save_path + '/picture/', args.pred_data_name)
     print("Finish!!!")
