@@ -1,25 +1,22 @@
 data/
 
 .idea/
+.vscode
+
 *.npy
-/EXP/*/results/valid/picture/
-
-*.png
-
 *.png
 *.svg
-
-main.py
-__pycache__
-main.py
+*.json
 *.csv
 
-models/faultseg3d.py
+__pycache__
 
-
-.vscode
 /EXP/001_400_50_Unet_dice_plus_ce
 /EXP/002_400_50_HRNet3D_48
-/EXP
-faultseg3d.py
+
+**/models/*
+!**/models/
+!**/models/FaultSeg3D_BEST.pth
+
+
 
