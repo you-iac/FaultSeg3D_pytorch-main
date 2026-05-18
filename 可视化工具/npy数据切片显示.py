@@ -3,13 +3,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
-import tkinter as tk
-from tkinter import filedialog
 import os
 from tqdm import tqdm
 
 
 def select_file():
+    import tkinter as tk
+    from tkinter import filedialog
+
     root = tk.Tk()
     root.withdraw()
     file_path = filedialog.askopenfilename(
@@ -60,22 +61,27 @@ def save_slice_image(slice_data: np.ndarray, save_path: str, fig_width: float, f
     plt.close(fig)
 
 
-if __name__ == '__main__':
-    selected_path = select_file()
-    if selected_path is None:
-        print('No file selected, exit.')
-        raise SystemExit(0)
+def save_volume_slices(data_or_path, output_dir=None, step=20):
+    if isinstance(data_or_path, (str, os.PathLike)):
+        data = np.load(data_or_path)
+        if output_dir is None:
+            output_dir = os.path.splitext(str(data_or_path))[0]
+    else:
+        data = np.asarray(data_or_path)
+        if output_dir is None:
+            raise ValueError('output_dir is required when data_or_path is an array.')
 
-    data = np.load(selected_path)
-    filename = os.path.splitext(selected_path)[0]
+    if data.ndim != 3:
+        raise ValueError(f'Expected 3D data, got shape {data.shape}.')
 
+    output_dir = str(output_dir)
     print('shape:', data.shape)
     print('range:', float(np.nanmin(data)), '~', float(np.nanmax(data)))
+    print('slice output:', output_dir)
 
-    os.makedirs(filename, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Save one slice every N indices.
-    step = 20
     imshow_params = get_imshow_params(data)
 
     # dim0 -> T-i
@@ -84,7 +90,7 @@ if __name__ == '__main__':
         fig_width = max(2.0, data.shape[2] / 20.0)
         fig_height = max(2.0, data.shape[1] / 20.0)
         for i in dim0_indices:
-            save_slice_image(data[i, :, :], f'{filename}/T-{i}.png', fig_width, fig_height, imshow_params)
+            save_slice_image(data[i, :, :], f'{output_dir}/T-{i}.png', fig_width, fig_height, imshow_params)
             pbar.update(1)
 
     # dim1 -> X-i
@@ -93,7 +99,7 @@ if __name__ == '__main__':
         fig_width = max(2.0, data.shape[2] / 20.0)
         fig_height = max(2.0, data.shape[0] / 20.0)
         for i in dim1_indices:
-            save_slice_image(data[:, i, :], f'{filename}/X-{i}.png', fig_width, fig_height, imshow_params)
+            save_slice_image(data[:, i, :], f'{output_dir}/X-{i}.png', fig_width, fig_height, imshow_params)
             pbar.update(1)
 
     # dim2 -> Y-i
@@ -102,5 +108,16 @@ if __name__ == '__main__':
         fig_width = max(2.0, data.shape[1] / 20.0)
         fig_height = max(2.0, data.shape[0] / 20.0)
         for i in dim2_indices:
-            save_slice_image(data[:, :, i], f'{filename}/Y-{i}.png', fig_width, fig_height, imshow_params)
+            save_slice_image(data[:, :, i], f'{output_dir}/Y-{i}.png', fig_width, fig_height, imshow_params)
             pbar.update(1)
+
+    return output_dir
+
+
+if __name__ == '__main__':
+    selected_path = select_file()
+    if selected_path is None:
+        print('No file selected, exit.')
+        raise SystemExit(0)
+
+    save_volume_slices(selected_path)
