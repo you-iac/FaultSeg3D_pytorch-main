@@ -11,8 +11,8 @@ data/
 
 __pycache__
 
-/EXP/001_400_50_Unet_dice_plus_ce
-/EXP/002_400_50_HRNet3D_48
+/EXP
+
 
 **/models/*
 !**/models/
