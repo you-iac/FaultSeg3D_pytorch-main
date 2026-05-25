@@ -171,7 +171,7 @@ class WeightedCrossEntropyDiceLoss(nn.Module):
             label_for_weights, scales=self.scales, min_w=self.min_w
         )
         loss_ce = weighted_cross_entropy(logits, label_ce, weight_map)
-        loss_dice = self.dice_loss(logits, label)
+        loss_dice = self.dice_loss(F.softmax(logits, dim=1), label)
 
         loss = self.ce_weight * loss_ce + self.dice_weight * loss_dice
         # 方便调试：可在外部读取最近一次的各项损失
@@ -270,7 +270,7 @@ def compute_loss_multiscale_weighted(
 
     # === 3) MultiScalePatchDice without weights ===
     dice_loss_fn = MultiScalePatchDiceLoss()
-    loss_dice = dice_loss_fn(logits, label)  # unchanged
+    loss_dice = dice_loss_fn(F.softmax(logits, dim=1), label)
 
     # === 4) combine ===
     loss = ce_weight * loss_ce + dice_weight * loss_dice
@@ -325,7 +325,7 @@ class WeightedCrossEntropyDiceLoss(nn.Module):
             label_for_weights, scales=self.scales, min_w=self.min_w
         )
         loss_ce = weighted_cross_entropy(logits, label_ce, weight_map)
-        loss_dice = self.dice_loss(logits, label)
+        loss_dice = self.dice_loss(F.softmax(logits, dim=1), label)
 
         loss = self.ce_weight * loss_ce + self.dice_weight * loss_dice
         # 方便调试：可在外部读取最近一次的各项损失

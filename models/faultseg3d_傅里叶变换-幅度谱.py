@@ -91,7 +91,6 @@ class FaultSeg3D(nn.Module):
         self.up3 = Up(96, 32)
         self.up4 = Up(48, 16)
         self.outc = OutConv(16, n_classes)
-        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x):
         # --- 关键修改点 2: 嵌入傅里叶处理 ---
@@ -123,8 +122,7 @@ class FaultSeg3D(nn.Module):
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
-        outputs = self.softmax(logits)
-        return outputs
+        return logits
 
 if __name__ == '__main__':
     # 查看网络参数量

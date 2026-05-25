@@ -22,6 +22,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def output_probabilities(outputs):
+    """Convert model logits to class probabilities."""
+    if outputs.dim() < 2:
+        raise ValueError(f"outputs must have a channel dimension, got shape={tuple(outputs.shape)}")
+    if outputs.size(1) == 1:
+        return torch.sigmoid(outputs)
+    return F.softmax(outputs, dim=1)
+
+
+def foreground_probability(outputs):
+    probs = output_probabilities(outputs)
+    if probs.size(1) == 1:
+        return probs
+    return probs[:, 1:2, ...]
+
+
+def numpy_output_probabilities(outputs):
+    """Convert a numpy batch of logits/probabilities to class probabilities."""
+    if outputs.ndim < 2:
+        raise ValueError(f"outputs must have a channel dimension, got shape={outputs.shape}")
+
+    if outputs.shape[1] == 1:
+        return 1.0 / (1.0 + np.exp(-outputs))
+
+    channel_sum = outputs.sum(axis=1, keepdims=True)
+    if outputs.min() >= 0.0 and outputs.max() <= 1.0 and np.allclose(channel_sum, 1.0, atol=1e-3):
+        return outputs
+
+    shifted = outputs - outputs.max(axis=1, keepdims=True)
+    exp_outputs = np.exp(shifted)
+    return exp_outputs / (exp_outputs.sum(axis=1, keepdims=True) + 1e-12)
+
+
 def save_args_info(args):
     # save args to config.txt
     argsDict = args.__dict__
@@ -93,9 +126,17 @@ def load_data(args):
 
 
 def compute_loss(outputs, labels, args):
+    prob_outputs = None
+
+    def get_prob_outputs():
+        nonlocal prob_outputs
+        if prob_outputs is None:
+            prob_outputs = output_probabilities(outputs)
+        return prob_outputs
+
     if args.loss_func == 'dice':
         criterion = DiceLoss().to(args.device)
-        loss = criterion(outputs, labels)
+        loss = criterion(get_prob_outputs(), labels)
         return loss
     elif args.loss_func == 'cross_with_weight':
         criterion = WeightedCrossEntropyLoss().to(args.device)
@@ -105,7 +146,7 @@ def compute_loss(outputs, labels, args):
         # print("dice_plus_ce");
         # 计算Dice Loss
         Patch_dice = DiceLoss().to(args.device)
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
 
         # 计算加权交叉熵损失
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
@@ -116,11 +157,11 @@ def compute_loss(outputs, labels, args):
         # 或按比例相加：combined_loss = alpha * loss_dice + (1 - alpha) * loss_ce
         return combined_loss
     elif args.loss_func == 'ConnectivityLoss':
-        criterion_conn  = ConnectivityLoss().to(args.device)
-        loss_conn  = criterion_conn (pred_prob=outputs, target=labels)
+        criterion_conn  = ConnectivityLoss(input_is_logits=False).to(args.device)
+        loss_conn  = criterion_conn(pred_prob=get_prob_outputs(), target=labels)
 
         criterion_dice = DiceLoss().to(args.device)
-        loss_dice = criterion_dice(outputs, labels)
+        loss_dice = criterion_dice(get_prob_outputs(), labels)
 
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
         loss_ce = criterion_ce(outputs, labels)
@@ -184,7 +225,7 @@ def compute_loss(outputs, labels, args):
     elif args.loss_func == 'fractal_consistency_loss':
         # base segmentation losses
         criterion_dice = DiceLoss().to(args.device)
-        dice_loss = criterion_dice(outputs, labels)
+        dice_loss = criterion_dice(get_prob_outputs(), labels)
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
         ce_loss = criterion_ce(outputs, labels)
 
@@ -224,12 +265,7 @@ def compute_loss(outputs, labels, args):
         if labels.dim() >= 4 and outputs.size(0) != labels.size(0) and outputs.size(1) == labels.size(0):
             outputs_for_fd = outputs.permute(1, 0, 2, 3, 4).contiguous()
 
-        pred_raw = outputs_for_fd[:, 1:2, ...] if outputs_for_fd.size(1) > 1 else outputs_for_fd
-        with torch.no_grad():
-            pred_min = float(pred_raw.min().item())
-            pred_max = float(pred_raw.max().item())
-        # if logits -> sigmoid; if already probability map -> keep as is
-        pred_prob = torch.sigmoid(pred_raw) if (pred_min < 0.0 or pred_max > 1.0) else pred_raw
+        pred_prob = foreground_probability(outputs_for_fd)
 
         if labels.dim() == 4:
             labels_for_fd = labels.unsqueeze(1).float()
@@ -261,7 +297,7 @@ def compute_loss(outputs, labels, args):
     elif args.loss_func == 'dice_plus_多尺度密度权重':
         "多尺度密度权重,使用不同窗口计算像素密度"
         criterion = DiceLoss().to(args.device)
-        loss_dice = criterion(outputs, labels)
+        loss_dice = criterion(get_prob_outputs(), labels)
 
         criterion_dce = MultiScaleDensityLoss().to(args.device)
         loss_dict = criterion_dce(outputs, labels)
@@ -272,7 +308,7 @@ def compute_loss(outputs, labels, args):
     elif args.loss_func == 'dice_plus_分型比较':
         "分型比较"
         criterion = DiceLoss().to(args.device)
-        loss_dice = criterion(outputs, labels)
+        loss_dice = criterion(get_prob_outputs(), labels)
 
         criterion_dce = LocalFractalSlopeWeightedCELoss(
             L=16,
@@ -294,15 +330,11 @@ def compute_loss(outputs, labels, args):
         "CE_plus_MultiScaleDensityMSELoss"
         # 对比标签与预测密度的差
         # 创建MultiScaleDensityMSELoss实例
-        criterion_mse = MultiScaleDensityMSELoss().to(args.device)
+        criterion_mse = MultiScaleDensityMSELoss(use_sigmoid=False).to(args.device)
         
         # MultiScaleDensityMSELoss需要 (B, 1, D, H, W) 格式
         # 从outputs中提取前景通道（索引1），并添加通道维度
-        if outputs.shape[1] == 2:
-            # outputs是 (B, 2, D, H, W)，提取前景通道并添加维度
-            pred_for_mse = outputs[:, 1:2, :, :, :]  # (B, 1, D, H, W)
-        else:
-            pred_for_mse = outputs  # 假设已经是 (B, 1, D, H, W)
+        pred_for_mse = foreground_probability(outputs)
         
         # 确保labels是 (B, 1, D, H, W) 格式
         if labels.dim() == 4:
@@ -328,7 +360,7 @@ def compute_loss(outputs, labels, args):
         # 计算Patch Dice Loss
         patch_size = getattr(args, 'patch_size', 32)  # 默认patch_size=32
         Patch_dice = PatchDiceLoss(patch_size=patch_size).to(args.device)
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
 
         # 计算加权交叉熵损失
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
@@ -344,7 +376,7 @@ def compute_loss(outputs, labels, args):
             patch_sizes=patch_sizes,
             include_global=True
         ).to(args.device)
-        loss = multi_dice(outputs, labels)
+        loss = multi_dice(get_prob_outputs(), labels)
         return loss
     elif args.loss_func == 'multi_scale_patch_dice_plus_ce':
         # 多尺度Patch Dice + CE
@@ -353,7 +385,7 @@ def compute_loss(outputs, labels, args):
             patch_sizes=patch_sizes,
             include_global=True
         ).to(args.device)
-        loss_dice = multi_dice(outputs, labels)
+        loss_dice = multi_dice(get_prob_outputs(), labels)
 
         # 计算加权交叉熵损失
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
@@ -365,7 +397,7 @@ def compute_loss(outputs, labels, args):
         # 1. 计算基础分割损失 (Dice + 加权CE)
         # 假设 DiceLoss 和 CrossEntropyLoss 能够正确处理 (B, C, D, H, W) 的 3D 输入
         Patch_dice = DiceLoss().to(args.device)
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
 
         # 计算加权交叉熵损失
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
@@ -377,7 +409,7 @@ def compute_loss(outputs, labels, args):
 
         # 从 Logits (outputs) 中获取前景类 (C=1) 的预测概率 P
         # 假设 outputs 形状为 (B, 2, D, H, W)，前景类是索引 1
-        probabilities = torch.sigmoid(outputs[:, 1, :, :, :])  # 形状为 (B, D, H, W)
+        probabilities = get_prob_outputs()[:, 1, :, :, :] if outputs.size(1) > 1 else get_prob_outputs().squeeze(1)
 
         # 惩罚项 L_smooth_3D = Sum( (P_x)^2 + (P_y)^2 + (P_z)^2 ) / N
 
@@ -417,7 +449,7 @@ def compute_loss(outputs, labels, args):
         Patch_dice = DiceLoss().to(args.device)
 
         # --- 2. 数据准备 ---
-        y_pred = F.softmax(outputs, dim=1)
+        y_pred = get_prob_outputs()
         num_classes = outputs.size(1)
 
         if labels.dim() == outputs.dim() - 1:
@@ -447,7 +479,7 @@ def compute_loss(outputs, labels, args):
         loss_cldice = criterion_cldice(y_true_onehot_small, y_pred_small)
 
         # Dice 损失
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
 
         # 组合损失
         combined_loss = (1.0 - ALPHA_CL) * loss_dice + ALPHA_CL * loss_cldice
@@ -474,7 +506,7 @@ def compute_loss(outputs, labels, args):
         ).to(args.device)
 
         # 计算 Dice 损失
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
 
         # 计算拓扑损失
         loss_topo = criterion_topo(outputs, labels)
@@ -493,7 +525,7 @@ def compute_loss(outputs, labels, args):
         Patch_dice = DiceLoss().to(args.device)
 
         # 计算各种损失
-        loss_dice = Patch_dice(outputs, labels)
+        loss_dice = Patch_dice(get_prob_outputs(), labels)
         criterion_ce = WeightedCrossEntropyLoss().to(args.device)
         loss_ce = criterion_ce(outputs, labels)
 
@@ -595,7 +627,8 @@ def save_result(args, segs, inputs, gts, val_loss, val_iou, val_dice):
 
         # seg = segs[i].argmax(axis=1)
         # 做概率的分布图，所以不进行argmax
-        seg = segs[i][:, 1, :, :, :]
+        seg_probs = numpy_output_probabilities(segs[i])
+        seg = seg_probs[:, 1, :, :, :] if seg_probs.shape[1] > 1 else seg_probs[:, 0, :, :, :]
 
         
         img = inputs[i]

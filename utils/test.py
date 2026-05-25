@@ -1,6 +1,6 @@
 import os
 import importlib.util
-from utils.tools import save_pred_picture, load_pred_data
+from utils.tools import foreground_probability, save_pred_picture, load_pred_data
 from models.faultseg3d import FaultSeg3D
 import numpy as np
 import torch
@@ -88,9 +88,10 @@ def sliding_window_prediction(input_data, block_size, overlap, model, args):
 
                 input_block = torch.from_numpy(block_normal).to(args.device).float()
 
-                block_prediction = model(input_block)
+                with torch.no_grad():
+                    block_prediction = foreground_probability(model(input_block))
 
-                block_prediction = block_prediction[:, 1, :, :, :]
+                block_prediction = block_prediction[:, 0, :, :, :]
                 # block_prediction = block_prediction.argmax(axis=1)
                 block_prediction = block_prediction.detach().cpu().numpy()
                 block_prediction = np.squeeze(block_prediction)
@@ -202,7 +203,7 @@ def prediction(model, data, device):
     else:
         input_tensor = input_tensor.float()
     with torch.no_grad():
-        result = model(input_tensor).cpu().numpy()[0, 0, :m1, :m2, :m3]
+        result = foreground_probability(model(input_tensor)).cpu().numpy()[0, 0, :m1, :m2, :m3]
     return result
 
 
