@@ -3,6 +3,11 @@ from torchsummary import summary
 import torch.nn as nn
 import torch.nn.functional as F
 
+try:
+    from .傅里叶卷积.FFC import FFCDoubleConv
+except ImportError:
+    from 傅里叶卷积.FFC import FFCDoubleConv
+
 
 class DoubleConv(nn.Module):
     def __init__(self, in_channels, out_channels, mid_channels=None):
@@ -23,15 +28,33 @@ class DoubleConv(nn.Module):
 
 
 class FourierHighPassInput3D(nn.Module):
-    """Create a spatially aligned high-frequency branch using FFT and iFFT."""
+    """Create spatially aligned multi-band high-frequency branches."""
 
-    def __init__(self, cutoff=0.18, eps=1e-6):
+    def __init__(self, in_channels, cutoffs=(0.10, 0.18, 0.30), eps=1e-6):
         super().__init__()
-        self.cutoff = cutoff
+        if isinstance(cutoffs, (int, float)):
+            cutoffs = (float(cutoffs),)
+        self.cutoffs = tuple(float(cutoff) for cutoff in cutoffs)
         self.eps = eps
+        self.high_fusion = nn.Conv3d(
+            in_channels * len(self.cutoffs),
+            in_channels,
+            kernel_size=1,
+            bias=False,
+        )
         self.branch_scale = nn.Parameter(torch.tensor(0.0))
+        self._init_fusion(in_channels)
 
-    def _high_pass_mask(self, spatial_size, device, dtype):
+    def _init_fusion(self, in_channels):
+        with torch.no_grad():
+            self.high_fusion.weight.zero_()
+            scale = 1.0 / len(self.cutoffs)
+            for channel_idx in range(in_channels):
+                for cutoff_idx in range(len(self.cutoffs)):
+                    input_idx = cutoff_idx * in_channels + channel_idx
+                    self.high_fusion.weight[channel_idx, input_idx, 0, 0, 0] = scale
+
+    def _high_pass_mask(self, spatial_size, cutoff, device, dtype):
         depth, height, width = spatial_size
         freq_z = torch.fft.fftfreq(depth, device=device, dtype=dtype)
         freq_y = torch.fft.fftfreq(height, device=device, dtype=dtype)
@@ -45,36 +68,42 @@ class FourierHighPassInput3D(nn.Module):
         radius = radius / radius.max().clamp_min(self.eps)
 
         # Smooth high-pass mask avoids ringing from a hard frequency cutoff.
-        mask = 1.0 - torch.exp(-((radius / self.cutoff).square()))
+        mask = 1.0 - torch.exp(-((radius / cutoff).square()))
         return mask.view(1, 1, depth, height, width // 2 + 1)
 
-    def forward(self, x):
-        spatial_size = x.shape[-3:]
-        mask = self._high_pass_mask(spatial_size, x.device, x.dtype)
-
-        x_fft = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
-        high = torch.fft.irfftn(
-            x_fft * mask,
-            s=spatial_size,
-            dim=(-3, -2, -1),
-            norm="ortho",
-        )
-
+    def _standardize(self, high):
         dims = tuple(range(2, high.dim()))
         mean = high.mean(dim=dims, keepdim=True)
         std = high.std(dim=dims, keepdim=True).clamp_min(self.eps)
-        high = (high - mean) / std
+        return (high - mean) / std
 
+    def forward(self, x):
+        spatial_size = x.shape[-3:]
+        x_fft = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
+
+        high_bands = []
+        for cutoff in self.cutoffs:
+            mask = self._high_pass_mask(spatial_size, cutoff, x.device, x.dtype)
+            high = torch.fft.irfftn(
+                x_fft * mask,
+                s=spatial_size,
+                dim=(-3, -2, -1),
+                norm="ortho",
+            )
+            high_bands.append(self._standardize(high))
+
+        high = self.high_fusion(torch.cat(high_bands, dim=1))
+        high = self._standardize(high)
         high = high * torch.sigmoid(self.branch_scale)
         return torch.cat([x, high], dim=1)
 
 
 class Down(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, conv_block=DoubleConv):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool3d(2),
-            DoubleConv(in_channels, out_channels),
+            conv_block(in_channels, out_channels),
         )
 
     def forward(self, x):
@@ -122,12 +151,12 @@ class FaultSeg3D(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        self.freq_input = FourierHighPassInput3D(cutoff=0.18)
+        self.freq_input = FourierHighPassInput3D(n_channels, cutoffs=(0.10, 0.18, 0.30))
         self.inc = DoubleConv(n_channels * 2, 16)
 
         self.down1 = Down(16, 32)
-        self.down2 = Down(32, 64)
-        self.down3 = Down(64, 128)
+        self.down2 = Down(32, 64, conv_block=FFCDoubleConv)
+        self.down3 = Down(64, 128, conv_block=FFCDoubleConv)
 
         self.up2 = Up(192, 64)
         self.up3 = Up(96, 32)
