@@ -17,6 +17,7 @@ __pycache__
 **/models/*
 !**/models/
 !**/models/FaultSeg3D_BEST.pth
+!**/models/ffc_dff_3d.py
 
 
 
