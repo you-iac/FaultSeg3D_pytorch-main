@@ -1,311 +1,312 @@
-from __future__ import annotations
-
-from typing import Optional, Sequence, Tuple
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-Offset3D = Tuple[int, int, int]
-DEFAULT_OFFSETS_6N: Tuple[Offset3D, ...] = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+def _as_5d_target(target):
+    if target.dim() == 4:
+        target = target.unsqueeze(1)
+    if target.dim() != 5:
+        raise ValueError("target must have shape [B, D, H, W] or [B, C, D, H, W].")
+    if target.size(1) > 1:
+        target = target[:, 1:2]
+    return (target.float() > 0.5).float()
+
+
+def _foreground_probability(pred, input_is_probability=None):
+    if pred.dim() != 5:
+        raise ValueError("pred must have shape [B, C, D, H, W].")
+
+    if pred.size(1) == 2:
+        return torch.softmax(pred, dim=1)[:, 1:2]
+
+    if pred.size(1) != 1:
+        raise ValueError("connectivity loss supports one-channel or two-channel predictions.")
+
+    if input_is_probability is None:
+        pred_detached = pred.detach()
+        input_is_probability = pred_detached.min().item() >= 0.0 and pred_detached.max().item() <= 1.0
+
+    return pred if input_is_probability else torch.sigmoid(pred)
+
+
+def _shift_with_valid(x, dz, dy, dx):
+    out = torch.zeros_like(x)
+    valid = torch.zeros_like(x[:, :1])
+
+    _, _, depth, height, width = x.shape
+
+    src_z = slice(max(dz, 0), depth + min(dz, 0))
+    src_y = slice(max(dy, 0), height + min(dy, 0))
+    src_x = slice(max(dx, 0), width + min(dx, 0))
+
+    dst_z = slice(max(-dz, 0), depth - max(dz, 0))
+    dst_y = slice(max(-dy, 0), height - max(dy, 0))
+    dst_x = slice(max(-dx, 0), width - max(dx, 0))
+
+    out[:, :, dst_z, dst_y, dst_x] = x[:, :, src_z, src_y, src_x]
+    valid[:, :, dst_z, dst_y, dst_x] = 1.0
+    return out, valid
+
+
+def _dilate(mask, kernel_size):
+    if kernel_size <= 1:
+        return mask.float()
+    return F.max_pool3d(mask.float(), kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+
+
+def _pool_prob(pred, scale):
+    if scale == 1:
+        return pred
+    return F.avg_pool3d(pred, kernel_size=scale, stride=scale)
+
+
+def _pool_target(target, scale):
+    if scale == 1:
+        return target
+    return F.max_pool3d(target.float(), kernel_size=scale, stride=scale)
+
+
+def _make_offsets(neighborhood):
+    if isinstance(neighborhood, str):
+        neighborhood = neighborhood.lower()
+    if neighborhood in (6, "6", "axis"):
+        return [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    if neighborhood in (18, "18"):
+        max_l1 = 2
+    elif neighborhood in (26, "26"):
+        max_l1 = 3
+    else:
+        raise ValueError("neighborhood must be one of 6, 18, or 26.")
+
+    offsets = []
+    for dz in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dz == 0 and dy == 0 and dx == 0:
+                    continue
+                if abs(dz) + abs(dy) + abs(dx) > max_l1:
+                    continue
+                if dz > 0 or (dz == 0 and dy > 0) or (dz == 0 and dy == 0 and dx > 0):
+                    offsets.append((dz, dy, dx))
+    return offsets
+
+
+def _direction_weight(offset, axis_weights):
+    dz, dy, dx = offset
+    weights = torch.as_tensor(axis_weights, dtype=torch.float32)
+    active = torch.as_tensor([abs(dz), abs(dy), abs(dx)], dtype=torch.float32)
+    return float((active * weights).sum() / active.sum().clamp_min(1.0))
 
 
 class ConnectivityLoss(nn.Module):
-    """
-    nn.Module wrapper for connectivity_loss_v1.
+    """Break/merge separated multi-scale connectivity loss for 3D fault masks.
+
+    The loss accepts the current training output directly:
+    - two-channel logits/probabilities: [B, 2, D, H, W]
+    - one-channel logits/probabilities: [B, 1, D, H, W]
+    - labels: [B, D, H, W] or [B, 1, D, H, W]
     """
 
     def __init__(
         self,
-        mask_kernel: int = 3,
-        offsets: Sequence[Offset3D] = DEFAULT_OFFSETS_6N,
-        loss_type: str = "smooth_l1",
-        eps: float = 1e-6,
-        foreground_channel: int = 1,
-        input_is_logits: Optional[bool] = None,
-        track_stats: bool = True,
-    ) -> None:
+        break_weight=1.0,
+        merge_weight=0.2,
+        loss_weight=1.0,
+        scales=(1, 2, 4),
+        scale_weights=(0.5, 1.0, 0.7),
+        pred_threshold=0.3,
+        mask_kernel_size=3,
+        neighborhood=6,
+        axis_weights=(0.7, 1.0, 1.0),
+        break_axis_weights=None,
+        merge_axis_weights=None,
+        input_is_probability=None,
+        detach_pred_mask=True,
+        return_components=False,
+        eps=1e-6,
+        **kwargs,
+    ):
         super().__init__()
-        self.mask_kernel = mask_kernel
-        self.offsets = tuple(offsets)
-        self.loss_type = loss_type
+        loss_weight = kwargs.pop("weight", loss_weight)
+        loss_weight = kwargs.pop("conn_weight", loss_weight)
+        loss_weight = kwargs.pop("connectivity_weight", loss_weight)
+        loss_weight = kwargs.pop("lambda_conn", loss_weight)
+        pred_threshold = kwargs.pop("threshold", pred_threshold)
+        pred_threshold = kwargs.pop("prob_threshold", pred_threshold)
+        mask_kernel_size = kwargs.pop("kernel_size", mask_kernel_size)
+        mask_kernel_size = kwargs.pop("mask_size", mask_kernel_size)
+        mask_radius = kwargs.pop("radius", None)
+        mask_radius = kwargs.pop("mask_radius", mask_radius)
+        if mask_radius is not None:
+            mask_kernel_size = int(mask_radius) * 2 + 1
+
+        if isinstance(scales, int):
+            scales = (scales,)
+        if isinstance(scale_weights, (int, float)):
+            scale_weights = (float(scale_weights),) * len(scales)
+        if len(scales) != len(scale_weights):
+            raise ValueError("scales and scale_weights must have the same length.")
+        mask_kernel_size = int(mask_kernel_size)
+        if mask_kernel_size % 2 == 0:
+            mask_kernel_size += 1
+
+        self.break_weight = break_weight
+        self.merge_weight = merge_weight
+        self.loss_weight = loss_weight
+        self.scales = tuple(scales)
+        self.scale_weights = tuple(scale_weights)
+        self.pred_threshold = pred_threshold
+        self.mask_kernel_size = mask_kernel_size
+        self.offsets = tuple(_make_offsets(neighborhood))
+        self.axis_weights = tuple(axis_weights)
+        self.break_axis_weights = tuple(break_axis_weights) if break_axis_weights is not None else tuple(axis_weights)
+        self.merge_axis_weights = tuple(merge_axis_weights) if merge_axis_weights is not None else tuple(axis_weights)
+        self.input_is_probability = input_is_probability
+        self.detach_pred_mask = detach_pred_mask
+        self.return_components = return_components
         self.eps = eps
-        self.foreground_channel = int(foreground_channel)
-        self.input_is_logits = input_is_logits
-        self.track_stats = bool(track_stats)
-        self.latest_stats = None
 
-    def forward(self, pred_prob: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred_prob = _extract_fault_probability(
-            pred=pred_prob,
-            foreground_channel=self.foreground_channel,
-            input_is_logits=self.input_is_logits,
-        )
-        out = connectivity_loss_v1(
-            pred_prob=pred_prob,
-            target=target,
-            mask_kernel=self.mask_kernel,
-            offsets=self.offsets,
-            loss_type=self.loss_type,
-            eps=self.eps,
-            return_stats=self.track_stats,
-        )
-        if self.track_stats:
-            loss, stats = out
-            self.latest_stats = stats
-            return loss
-        self.latest_stats = None
-        return out
+        self.last_break_loss = None
+        self.last_merge_loss = None
 
+    def forward(self, pred=None, target=None, *args, **kwargs):
+        if pred is None:
+            pred = kwargs.pop("pred_prob", None)
+        if pred is None:
+            pred = kwargs.pop("prob", None)
+        if pred is None:
+            pred = kwargs.pop("logits", None)
+        if pred is None:
+            pred = kwargs.pop("outputs", None)
+        if target is None:
+            target = kwargs.pop("label", None)
+        if target is None:
+            target = kwargs.pop("labels", None)
+        if target is None:
+            target = kwargs.pop("gt", None)
+        if pred is None or target is None:
+            raise TypeError("ConnectivityLoss.forward requires pred/pred_prob and target/labels.")
 
-def _ensure_5d_single_channel(x: torch.Tensor, name: str) -> torch.Tensor:
-    """
-    Ensure x has shape [B, 1, D, H, W].
-    Accepts [B, D, H, W] or [B, 1, D, H, W].
-    """
-    if x.dim() == 4:
-        x = x.unsqueeze(1)
-    if x.dim() != 5:
-        raise ValueError(f"{name} must be 4D or 5D tensor, got shape={tuple(x.shape)}")
-    if x.size(1) != 1:
-        raise ValueError(f"{name} must have channel size 1, got shape={tuple(x.shape)}")
-    return x
+        pred = _foreground_probability(pred, self.input_is_probability)
+        target = _as_5d_target(target).to(device=pred.device, dtype=pred.dtype)
 
+        total = pred.new_tensor(0.0)
+        break_total = pred.new_tensor(0.0)
+        merge_total = pred.new_tensor(0.0)
+        weight_total = pred.new_tensor(0.0)
 
-def _infer_is_logits(pred: torch.Tensor) -> bool:
-    pred_detached = pred.detach()
-    return bool(pred_detached.min().item() < 0.0 or pred_detached.max().item() > 1.0)
+        for scale, scale_weight in zip(self.scales, self.scale_weights):
+            if min(pred.shape[-3:]) < scale:
+                continue
+            pred_s = _pool_prob(pred, scale)
+            target_s = _pool_target(target, scale)
 
+            break_s, merge_s = self._single_scale_loss(pred_s, target_s)
+            scale_weight_t = pred.new_tensor(float(scale_weight))
 
-def _extract_fault_probability(
-    pred: torch.Tensor,
-    foreground_channel: int = 1,
-    input_is_logits: Optional[bool] = None,
-) -> torch.Tensor:
-    """
-    Convert model output to fault probability map [B,1,D,H,W].
+            break_total = break_total + scale_weight_t * break_s
+            merge_total = merge_total + scale_weight_t * merge_s
+            total = total + scale_weight_t * (self.break_weight * break_s + self.merge_weight * merge_s)
+            weight_total = weight_total + scale_weight_t
 
-    Supported inputs:
-    - [B,1,D,H,W] or [B,D,H,W]
-    - [B,C,D,H,W] (C>=2), using foreground_channel
-    """
-    if pred.dim() == 4:
-        pred = pred.unsqueeze(1)
-    if pred.dim() != 5:
-        raise ValueError(f"pred must be 4D or 5D tensor, got shape={tuple(pred.shape)}")
+        if weight_total <= 0:
+            return pred.sum() * 0.0
 
-    channels = pred.size(1)
-    if channels == 1:
-        is_logits = _infer_is_logits(pred) if input_is_logits is None else bool(input_is_logits)
-        prob = torch.sigmoid(pred) if is_logits else pred
-        return prob.clamp(0.0, 1.0)
+        total = self.loss_weight * total / weight_total.clamp_min(self.eps)
+        break_total = break_total / weight_total.clamp_min(self.eps)
+        merge_total = merge_total / weight_total.clamp_min(self.eps)
 
-    if foreground_channel < 0 or foreground_channel >= channels:
-        raise ValueError(
-            f"foreground_channel={foreground_channel} out of range for pred shape={tuple(pred.shape)}"
-        )
+        self.last_break_loss = break_total.detach()
+        self.last_merge_loss = merge_total.detach()
 
-    is_logits = _infer_is_logits(pred) if input_is_logits is None else bool(input_is_logits)
-    if is_logits:
-        prob = torch.softmax(pred, dim=1)[:, foreground_channel : foreground_channel + 1, ...]
-    else:
-        prob = pred[:, foreground_channel : foreground_channel + 1, ...]
-    return prob.clamp(0.0, 1.0)
+        if self.return_components:
+            return total, {"break": break_total, "merge": merge_total}
+        return total
 
+    def _single_scale_loss(self, pred, target):
+        pred = pred.clamp(self.eps, 1.0 - self.eps)
 
-def _offset_display_name(offset: Offset3D) -> str:
-    if offset == (1, 0, 0):
-        return "z"
-    if offset == (0, 1, 0):
-        return "y"
-    if offset == (0, 0, 1):
-        return "x"
-    dz, dy, dx = offset
-    return f"({dz},{dy},{dx})"
+        pred_for_mask = pred.detach() if self.detach_pred_mask else pred
+        target_region = _dilate(target, self.mask_kernel_size)
+        pred_region = _dilate((pred_for_mask > self.pred_threshold).float(), self.mask_kernel_size)
 
+        # Break loss must see GT-near regions even when prediction is currently low.
+        break_mask = target_region
 
-def build_fault_neighborhood_mask(target: torch.Tensor, kernel_size: int = 7) -> torch.Tensor:
-    """
-    Build fault-neighborhood mask M from label Y.
+        # Merge loss focuses on GT-near and predicted-positive regions to avoid full-background domination.
+        merge_mask = torch.clamp(target_region + pred_region, 0.0, 1.0)
 
-    Args:
-        target: [B,1,D,H,W] or [B,D,H,W], values in {0,1} (or probabilistic labels).
-        kernel_size: neighborhood size for dilation-like max pooling. Must be positive odd.
+        break_terms = []
+        merge_terms = []
 
-    Returns:
-        mask: [B,1,D,H,W], float tensor in [0,1]
-    """
-    if kernel_size <= 0 or kernel_size % 2 == 0:
-        raise ValueError(f"kernel_size must be positive odd integer, got {kernel_size}")
+        for offset in self.offsets:
+            dz, dy, dx = offset
+            pred_n, valid = _shift_with_valid(pred, dz, dy, dx)
+            target_n, _ = _shift_with_valid(target, dz, dy, dx)
+            break_mask_n, _ = _shift_with_valid(break_mask, dz, dy, dx)
+            merge_mask_n, _ = _shift_with_valid(merge_mask, dz, dy, dx)
 
-    target = _ensure_5d_single_channel(target, "target").float()
-    target_bin = (target > 0.5).float()
+            pred_aff = pred * pred_n
+            target_aff = target * target_n
 
-    if kernel_size == 1:
-        return target_bin
+            break_pair_mask = valid * break_mask * break_mask_n
+            merge_pair_mask = valid * merge_mask * merge_mask_n
 
-    pad = kernel_size // 2
-    mask = F.max_pool3d(target_bin, kernel_size=kernel_size, stride=1, padding=pad)
-    return torch.clamp(mask, 0.0, 1.0)
+            break_eligible = target_aff * break_pair_mask
+            merge_eligible = (1.0 - target_aff) * merge_pair_mask
+
+            break_loss = (break_eligible * (1.0 - pred_aff)).sum() / break_eligible.sum().clamp_min(self.eps)
+            merge_loss = (merge_eligible * pred_aff).sum() / merge_eligible.sum().clamp_min(self.eps)
+
+            break_dir_weight = pred.new_tensor(_direction_weight(offset, self.break_axis_weights))
+            merge_dir_weight = pred.new_tensor(_direction_weight(offset, self.merge_axis_weights))
+
+            break_terms.append(break_dir_weight * break_loss)
+            merge_terms.append(merge_dir_weight * merge_loss)
+
+        break_out = torch.stack(break_terms).mean() if break_terms else pred.new_tensor(0.0)
+        merge_out = torch.stack(merge_terms).mean() if merge_terms else pred.new_tensor(0.0)
+        return break_out, merge_out
 
 
-def _shift_pair(x: torch.Tensor, offset: Offset3D) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Return aligned neighbor pairs x(p) and x(p+offset), both cropped to valid overlap.
-    Supports positive and negative offsets.
-    """
-    if x.dim() != 5:
-        raise ValueError(f"x must be 5D [B,1,D,H,W], got shape={tuple(x.shape)}")
-
-    dz, dy, dx = offset
-    _, _, d, h, w = x.shape
-
-    if abs(dz) >= d or abs(dy) >= h or abs(dx) >= w:
-        raise ValueError(
-            f"Offset {offset} is too large for input spatial size {(d, h, w)}"
-        )
-
-    z1 = slice(max(0, -dz), d - max(0, dz))
-    y1 = slice(max(0, -dy), h - max(0, dy))
-    x1 = slice(max(0, -dx), w - max(0, dx))
-
-    z2 = slice(max(0, dz), d - max(0, -dz))
-    y2 = slice(max(0, dy), h - max(0, -dy))
-    x2 = slice(max(0, dx), w - max(0, -dx))
-
-    return x[:, :, z1, y1, x1], x[:, :, z2, y2, x2]
+class MultiScaleConnectivityLoss(ConnectivityLoss):
+    pass
 
 
-def _pointwise_connectivity_loss(
-    pred_edge: torch.Tensor,
-    gt_edge: torch.Tensor,
-    loss_type: str,
-) -> torch.Tensor:
-    loss_type = loss_type.lower()
-    if loss_type == "l1":
-        return F.l1_loss(pred_edge, gt_edge, reduction="none")
-    if loss_type == "mse":
-        return F.mse_loss(pred_edge, gt_edge, reduction="none")
-    if loss_type == "bce":
-        pred_edge = pred_edge.clamp(1e-6, 1.0 - 1e-6)
-        return F.binary_cross_entropy(pred_edge, gt_edge, reduction="none")
-    if loss_type == "smooth_l1":
-        return F.smooth_l1_loss(pred_edge, gt_edge, reduction="none")
-    raise ValueError(f"Unsupported loss_type: {loss_type}")
+class DirectionalConnectivityLoss(ConnectivityLoss):
+    pass
 
 
-def connectivity_loss_v1(
-    pred_prob: torch.Tensor,
-    target: torch.Tensor,
-    mask_kernel: int = 7,
-    offsets: Sequence[Offset3D] = DEFAULT_OFFSETS_6N,
-    loss_type: str = "smooth_l1",
-    eps: float = 1e-6,
-    return_stats: bool = False,
-) -> torch.Tensor:
-    """
-    Connectivity loss for 3D segmentation.
-
-    Core definition:
-        A_pred_delta(x) = P(x) * P(x + delta)
-        A_gt_delta(x)   = Y(x) * Y(x + delta)
-        L_conn = sum_delta  sum_x M_delta(x) * l(A_pred_delta, A_gt_delta)
-                           / (sum_x M_delta(x) + eps)
-
-    Args:
-        pred_prob: [B,1,D,H,W] probability map in [0,1].
-        target: [B,1,D,H,W] binary labels in {0,1}.
-        mask_kernel: size of local fault-neighborhood mask.
-        offsets: list/tuple of 3D offsets, e.g. 6-neighborhood positive half:
-                 ((1,0,0),(0,1,0),(0,0,1)).
-        loss_type: one of {"smooth_l1","bce","l1","mse"}.
-        eps: numerical stability term for denominator.
-    """
-    pred_prob = _ensure_5d_single_channel(pred_prob, "pred_prob").float()
-    target = _ensure_5d_single_channel(target, "target").float()
-
-    if pred_prob.shape != target.shape:
-        raise ValueError(
-            f"Shape mismatch: pred_prob={tuple(pred_prob.shape)}, target={tuple(target.shape)}"
-        )
-    if len(offsets) == 0:
-        raise ValueError("offsets must contain at least one direction")
-
-    pred_prob = pred_prob.clamp(0.0, 1.0)
-    target_bin = (target > 0.5).float()
-    mask = build_fault_neighborhood_mask(target_bin, kernel_size=mask_kernel)
-
-    total_loss = pred_prob.new_tensor(0.0)
-    valid_dirs = 0
-    direction_losses = {}
-    direction_edge_counts = {}
-
-    for idx, offset in enumerate(offsets):
-        p1, p2 = _shift_pair(pred_prob, offset)
-        y1, y2 = _shift_pair(target_bin, offset)
-        m1, m2 = _shift_pair(mask, offset)
-
-        conn_pred = p1 * p2
-        conn_gt = y1 * y2
-        edge_mask = (m1 * m2).detach()
-
-        diff = _pointwise_connectivity_loss(conn_pred, conn_gt, loss_type=loss_type)
-        masked_sum = (diff * edge_mask).sum()
-        normalizer = edge_mask.sum().clamp_min(eps)
-        loss_dir = masked_sum / normalizer
-        total_loss = total_loss + loss_dir
-        valid_dirs += 1
-        if return_stats:
-            name = _offset_display_name(offset)
-            if name in direction_losses:
-                name = f"{name}_{idx}"
-            direction_losses[name] = float(loss_dir.detach().item())
-            direction_edge_counts[name] = float(edge_mask.sum().detach().item())
-
-    loss = total_loss / float(valid_dirs)
-    if not return_stats:
-        return loss
-
-    stats = {
-        "loss": float(loss.detach().item()),
-        "direction_losses": direction_losses,
-        "direction_edge_counts": direction_edge_counts,
-        "total_edge_count": float(sum(direction_edge_counts.values())),
-    }
-    return loss, stats
+class BreakMergeConnectivityLoss(ConnectivityLoss):
+    pass
 
 
+class SoftConnectivityLoss(ConnectivityLoss):
+    pass
 
 
-def connectivity_loss_from_logits(
-    logits: torch.Tensor,
-    target: torch.Tensor,
-    foreground_channel: int = 1,
-    **kwargs,
-) -> torch.Tensor:
-    """
-    Convenience function when model output is logits.
-
-    Args:
-        logits:
-          - [B,2,D,H,W] (foreground channel selected by foreground_channel), or
-          - [B,1,D,H,W].
-        target: [B,1,D,H,W] or [B,D,H,W]
-    """
-    pred_prob = _extract_fault_probability(
-        pred=logits,
-        foreground_channel=foreground_channel,
-        input_is_logits=True,
-    )
-
-    return connectivity_loss_v1(pred_prob=pred_prob, target=target, **kwargs)
+class ConnectivityLoss3D(ConnectivityLoss):
+    pass
 
 
-__all__ = [
-    "DEFAULT_OFFSETS_6N",
-    "ConnectivityLoss",
-    "build_fault_neighborhood_mask",
-    "connectivity_loss_from_logits",
-    "connectivity_loss_v1",
-]
+def connectivity_loss(pred, target, **kwargs):
+    return ConnectivityLoss(**kwargs)(pred, target)
+
+
+def multiscale_connectivity_loss(pred, target, **kwargs):
+    return ConnectivityLoss(**kwargs)(pred, target)
+
+
+def directional_connectivity_loss(pred, target, **kwargs):
+    return ConnectivityLoss(**kwargs)(pred, target)
+
+
+def soft_connectivity_loss(pred, target, **kwargs):
+    return ConnectivityLoss(**kwargs)(pred, target)
+
+
+def __getattr__(name):
+    if "connect" in name.lower() and "loss" in name.lower():
+        return ConnectivityLoss
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -14,12 +14,9 @@ __pycache__
 /EXP
 
 
-**/models/*
-!**/models/
-!**/models/FaultSeg3D_BEST.pth
-!**/models/ffc_dff_3d.py
-
-
+models/faultseg3d.py
+main_.py
+models/test/
 
 
 main_.py
