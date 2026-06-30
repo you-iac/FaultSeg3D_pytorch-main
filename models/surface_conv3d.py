@@ -20,6 +20,22 @@ def _normalize_grid_coord(coord, size):
     return coord * (2.0 / float(size - 1)) - 1.0
 
 
+def _as_3tuple(value, name):
+    if isinstance(value, int):
+        value = (value, value, value)
+    if len(value) != 3:
+        raise ValueError(f"{name} must be an int or a 3-tuple.")
+    if any(v <= 0 for v in value):
+        raise ValueError(f"{name} values must be positive.")
+    return tuple(value)
+
+
+def _stride_slice(x, stride):
+    if stride == (1, 1, 1):
+        return x
+    return x[:, :, ::stride[0], ::stride[1], ::stride[2]]
+
+
 def _base_mesh(batch_size, depth, height, width, device, dtype):
     z = torch.arange(depth, device=device, dtype=dtype)
     y = torch.arange(height, device=device, dtype=dtype)
@@ -117,6 +133,8 @@ class SurfaceConv3d(nn.Module):
         plane="xz",
         mode="accum",
         offset_scale=1.0,
+        stride=1,
+        groups=1,
         bias=True,
     ):
         super().__init__()
@@ -126,6 +144,10 @@ class SurfaceConv3d(nn.Module):
             raise ValueError("plane must be 'xz' or 'yz'.")
         if mode not in ("accum", "equation"):
             raise ValueError("mode must be 'accum' or 'equation'.")
+        if groups <= 0:
+            raise ValueError("groups must be positive.")
+        if in_channels % groups != 0 or out_channels % groups != 0:
+            raise ValueError("in_channels and out_channels must be divisible by groups.")
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -133,6 +155,10 @@ class SurfaceConv3d(nn.Module):
         self.plane = plane
         self.mode = mode
         self.offset_scale = offset_scale
+        self.stride = _as_3tuple(stride, "stride")
+        self.groups = groups
+        self.in_channels_per_group = in_channels // groups
+        self.out_channels_per_group = out_channels // groups
         self.points = _make_plane_points(kernel_size)
         self.num_points = kernel_size * kernel_size
 
@@ -147,7 +173,7 @@ class SurfaceConv3d(nn.Module):
             kernel_size=3,
             padding=1,
         )
-        self.weight = nn.Parameter(torch.empty(out_channels, in_channels, self.num_points))
+        self.weight = nn.Parameter(torch.empty(out_channels, self.in_channels_per_group, self.num_points))
         self.bias = nn.Parameter(torch.empty(out_channels)) if bias else None
         self.reset_parameters()
 
@@ -195,10 +221,30 @@ class SurfaceConv3d(nn.Module):
             samples.append(_sample_3d(x, dz, dy, dx))
 
         sampled = torch.stack(samples, dim=2)
-        out = torch.einsum("bcpdhw,ocp->bodhw", sampled, self.weight)
+        if self.groups == 1:
+            out = torch.einsum("bcpdhw,ocp->bodhw", sampled, self.weight)
+        else:
+            batch_size, _, _, depth, height, width = sampled.shape
+            sampled = sampled.view(
+                batch_size,
+                self.groups,
+                self.in_channels_per_group,
+                self.num_points,
+                depth,
+                height,
+                width,
+            )
+            weight = self.weight.view(
+                self.groups,
+                self.out_channels_per_group,
+                self.in_channels_per_group,
+                self.num_points,
+            )
+            out = torch.einsum("bgcpdhw,gocp->bgodhw", sampled, weight)
+            out = out.reshape(batch_size, self.out_channels, depth, height, width)
         if self.bias is not None:
             out = out + self.bias.view(1, -1, 1, 1, 1)
-        return out
+        return _stride_slice(out, self.stride)
 
 
 class MultiDirectionSurfaceConv3d(nn.Module):
