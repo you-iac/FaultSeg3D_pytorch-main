@@ -13,6 +13,7 @@ from utils.dice_loss import (DiceLoss,
                              LocalFractalSlopeWeightedCELoss, FractalConsistencyLoss, compute_fractal_map
                              )
 from utils.loss.connectivity_loss import ConnectivityLoss
+from utils.loss.surface_guided_break_merge_loss import SurfaceGuidedBreakMergeLoss
 
 
 from .cldice import soft_cldice, soft_dice
@@ -180,6 +181,43 @@ def compute_loss(outputs, labels, args):
             with open(os.path.join(log_dir, 'log.txt'), 'a', encoding='utf-8') as f:
                 f.write(str(datetime.datetime.today()) + ' : ' + conn_log + '\n')
         
+        return combined_loss
+    elif args.loss_func == 'SurfaceGuidedBreakMergeLoss':
+        surface_weight = float(getattr(args, 'surface_weight', 0.1))
+        geometry_strength = float(getattr(args, 'surface_geometry_strength', 1.0))
+        if not 0.0 <= surface_weight < float('inf'):
+            raise ValueError('surface_weight must be finite and nonnegative')
+        if not 0.0 <= geometry_strength < float('inf'):
+            raise ValueError('surface_geometry_strength must be finite and nonnegative')
+        input_type = getattr(args, 'surface_input_type', 'probabilities')
+        if input_type not in ('probabilities', 'logits'):
+            raise ValueError('surface_input_type must be probabilities or logits')
+
+        current_epoch = int(getattr(args, 'current_epoch', 0))
+        if current_epoch <= 0 or current_epoch >= 20:
+            alpha = surface_weight
+        elif current_epoch <= 10:
+            alpha = 0.0
+        else:
+            alpha = surface_weight * (current_epoch - 10) / 10.0
+
+        loss_dice = DiceLoss().to(args.device)(outputs, labels)
+        loss_ce = WeightedCrossEntropyLoss().to(args.device)(outputs, labels)
+        combined_loss = loss_dice + loss_ce
+        if alpha > 0.0:
+            criterion_surface = SurfaceGuidedBreakMergeLoss(
+                input_is_probability=(input_type == 'probabilities'),
+                geometry_strength=geometry_strength,
+            ).to(args.device)
+            loss_surface = criterion_surface(outputs, labels)
+            combined_loss = combined_loss + alpha * loss_surface
+            if getattr(args, 'debug_loss', False):
+                print(
+                    f"[SurfaceLoss] epoch={current_epoch}, alpha={alpha:.6f}, "
+                    f"surface_loss={loss_surface.item():.6f}, "
+                    f"break_loss={criterion_surface.last_break_loss.item():.6f}, "
+                    f"merge_loss={criterion_surface.last_merge_loss.item():.6f}"
+                )
         return combined_loss
     elif args.loss_func == 'fractal_consistency_loss':
         # base segmentation losses
