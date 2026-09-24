@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 def _make_plane_points(kernel_size):
@@ -40,7 +41,7 @@ def _base_mesh(batch_size, depth, height, width, device, dtype):
     z = torch.arange(depth, device=device, dtype=dtype)
     y = torch.arange(height, device=device, dtype=dtype)
     x = torch.arange(width, device=device, dtype=dtype)
-    zz, yy, xx = torch.meshgrid(z, y, x)
+    zz, yy, xx = torch.meshgrid(z, y, x, indexing="ij")
     zz = zz.unsqueeze(0).expand(batch_size, -1, -1, -1)
     yy = yy.unsqueeze(0).expand(batch_size, -1, -1, -1)
     xx = xx.unsqueeze(0).expand(batch_size, -1, -1, -1)
@@ -123,6 +124,11 @@ class SurfaceConv3d(nn.Module):
     plane="yz" samples a deformable YZ surface and moves points along X.
     mode="accum" builds offsets from a center-propagated 5x5 surface.
     mode="equation" builds offsets from low-dimensional surface basis weights.
+
+    Points are sampled and contracted in chunks, without materializing all
+    K*K input feature volumes. During gradient-enabled execution, checkpointing
+    recomputes each chunk's grids and samples for backward. Parameter names and
+    shapes are unchanged; existing surface-convolution state dicts still load.
     """
 
     def __init__(
@@ -136,6 +142,8 @@ class SurfaceConv3d(nn.Module):
         stride=1,
         groups=1,
         bias=True,
+        point_chunk_size=5,
+        checkpoint_sampling=True,
     ):
         super().__init__()
         if kernel_size % 2 == 0:
@@ -148,6 +156,8 @@ class SurfaceConv3d(nn.Module):
             raise ValueError("groups must be positive.")
         if in_channels % groups != 0 or out_channels % groups != 0:
             raise ValueError("in_channels and out_channels must be divisible by groups.")
+        if not isinstance(point_chunk_size, int) or point_chunk_size <= 0:
+            raise ValueError("point_chunk_size must be a positive integer.")
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -161,6 +171,8 @@ class SurfaceConv3d(nn.Module):
         self.out_channels_per_group = out_channels // groups
         self.points = _make_plane_points(kernel_size)
         self.num_points = kernel_size * kernel_size
+        self.point_chunk_size = min(point_chunk_size, self.num_points)
+        self.checkpoint_sampling = checkpoint_sampling
 
         if mode == "accum":
             offset_channels = self.num_points
@@ -186,7 +198,7 @@ class SurfaceConv3d(nn.Module):
 
     def _height_from_equation(self, x, control):
         values = _axis_values(self.kernel_size, x.device, x.dtype)
-        uu, vv = torch.meshgrid(values, values)
+        uu, vv = torch.meshgrid(values, values, indexing="ij")
         basis = torch.stack(
             (
                 uu,
@@ -205,46 +217,82 @@ class SurfaceConv3d(nn.Module):
             return _build_accumulated_height(raw)
         return self._height_from_equation(x, raw)
 
-    def forward(self, x):
-        height = self._surface_height(x)
-        samples = []
-        for point_index, (a, b) in enumerate(self.points):
-            normal_offset = height[:, point_index]
-            if self.plane == "xz":
-                dz = x.new_tensor(float(a))
-                dy = normal_offset
-                dx = x.new_tensor(float(b))
-            else:
-                dz = x.new_tensor(float(a))
-                dy = x.new_tensor(float(b))
-                dx = normal_offset
-            samples.append(_sample_3d(x, dz, dy, dx))
-
-        sampled = torch.stack(samples, dim=2)
-        if self.groups == 1:
-            out = torch.einsum("bcpdhw,ocp->bodhw", sampled, self.weight)
+    def _contract_chunk(self, x, normal_offset, weight, points, base_z, base_y, base_x):
+        batch_size, channels, depth, height, width = x.shape
+        point_a = points[:, 0].view(1, -1, 1, 1, 1)
+        point_b = points[:, 1].view(1, -1, 1, 1, 1)
+        zz = base_z + point_a
+        if self.plane == "xz":
+            yy, xx = base_y + normal_offset, base_x + point_b
         else:
-            batch_size, _, _, depth, height, width = sampled.shape
-            sampled = sampled.view(
-                batch_size,
-                self.groups,
-                self.in_channels_per_group,
-                self.num_points,
-                depth,
-                height,
-                width,
+            yy, xx = base_y + point_b, base_x + normal_offset
+        zz, yy, xx = torch.broadcast_tensors(zz, yy, xx)
+        grid = torch.stack(
+            (
+                _normalize_grid_coord(xx, width),
+                _normalize_grid_coord(yy, height),
+                _normalize_grid_coord(zz, depth),
+            ),
+            dim=-1,
+        )
+        chunk_size = normal_offset.shape[1]
+        out_depth, out_height, out_width = normal_offset.shape[-3:]
+        # Pack points into output depth: one grid_sample call, no input copies
+        # and no second allocation from stacking individual sampled volumes.
+        sampled = F.grid_sample(
+            x,
+            grid.reshape(batch_size, chunk_size * out_depth, out_height, out_width, 3),
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).reshape(batch_size, channels, chunk_size, out_depth, out_height, out_width)
+        if self.groups == 1:
+            return torch.einsum("bcpdhw,ocp->bodhw", sampled, weight)
+        sampled = sampled.reshape(
+            batch_size, self.groups, self.in_channels_per_group,
+            chunk_size, out_depth, out_height, out_width,
+        )
+        weight = weight.reshape(
+            self.groups, self.out_channels_per_group,
+            self.in_channels_per_group, chunk_size,
+        )
+        out = torch.einsum("bgcpdhw,gocp->bgodhw", sampled, weight)
+        return out.reshape(batch_size, self.out_channels, out_depth, out_height, out_width)
+
+    def forward(self, x):
+        height = _stride_slice(self._surface_height(x), self.stride)
+        depth, in_height, width = x.shape[-3:]
+        sd, sh, sw = self.stride
+        # Sample only requested output locations, normalized to the original
+        # input dimensions. This matches the former full-output stride slice.
+        base_z = torch.arange(0, depth, sd, device=x.device, dtype=x.dtype).view(1, 1, -1, 1, 1)
+        base_y = torch.arange(0, in_height, sh, device=x.device, dtype=x.dtype).view(1, 1, 1, -1, 1)
+        base_x = torch.arange(0, width, sw, device=x.device, dtype=x.dtype).view(1, 1, 1, 1, -1)
+        points = x.new_tensor(self.points)
+        recompute = self.checkpoint_sampling and torch.is_grad_enabled() and (
+            x.requires_grad or height.requires_grad or self.weight.requires_grad
+        )
+        out = None
+        for start in range(0, self.num_points, self.point_chunk_size):
+            end = min(start + self.point_chunk_size, self.num_points)
+            args = (
+                x, height[:, start:end], self.weight[:, :, start:end],
+                points[start:end], base_z, base_y, base_x,
             )
-            weight = self.weight.view(
-                self.groups,
-                self.out_channels_per_group,
-                self.in_channels_per_group,
-                self.num_points,
-            )
-            out = torch.einsum("bgcpdhw,gocp->bgodhw", sampled, weight)
-            out = out.reshape(batch_size, self.out_channels, depth, height, width)
+            if recompute:
+                # Checkpoint BOTH sampling and contraction. Checkpointing only
+                # grid_sample would leave its huge output saved by einsum.
+                # Explicit arguments avoid late-bound loop indices on replay.
+                partial = checkpoint(
+                    self._contract_chunk, *args,
+                    use_reentrant=False, preserve_rng_state=False,
+                )
+            else:
+                partial = self._contract_chunk(*args)
+            out = partial if out is None else out + partial
         if self.bias is not None:
             out = out + self.bias.view(1, -1, 1, 1, 1)
-        return _stride_slice(out, self.stride)
+        return out
 
 
 class MultiDirectionSurfaceConv3d(nn.Module):
@@ -257,6 +305,8 @@ class MultiDirectionSurfaceConv3d(nn.Module):
         mode="accum",
         surface_kernel_size=5,
         offset_scale=1.0,
+        point_chunk_size=5,
+        checkpoint_sampling=True,
     ):
         super().__init__()
         self.xz_surface = SurfaceConv3d(
@@ -267,6 +317,8 @@ class MultiDirectionSurfaceConv3d(nn.Module):
             mode=mode,
             offset_scale=offset_scale,
             bias=False,
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
         )
         self.yz_surface = SurfaceConv3d(
             in_channels,
@@ -276,6 +328,8 @@ class MultiDirectionSurfaceConv3d(nn.Module):
             mode=mode,
             offset_scale=offset_scale,
             bias=False,
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
         )
         self.normal_conv = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
         self.fuse = nn.Sequential(
@@ -308,6 +362,8 @@ class DoubleSurfaceConv(nn.Module):
         mode="accum",
         surface_kernel_size=5,
         offset_scale=1.0,
+        point_chunk_size=5,
+        checkpoint_sampling=True,
     ):
         super().__init__()
         if mid_channels is None:
@@ -319,6 +375,8 @@ class DoubleSurfaceConv(nn.Module):
                 mode=mode,
                 surface_kernel_size=surface_kernel_size,
                 offset_scale=offset_scale,
+                point_chunk_size=point_chunk_size,
+                checkpoint_sampling=checkpoint_sampling,
             ),
             MultiDirectionSurfaceConv3d(
                 mid_channels,
@@ -326,6 +384,8 @@ class DoubleSurfaceConv(nn.Module):
                 mode=mode,
                 surface_kernel_size=surface_kernel_size,
                 offset_scale=offset_scale,
+                point_chunk_size=point_chunk_size,
+                checkpoint_sampling=checkpoint_sampling,
             ),
         )
 
@@ -334,7 +394,8 @@ class DoubleSurfaceConv(nn.Module):
 
 
 class DoubleAccumSurfaceConv(DoubleSurfaceConv):
-    def __init__(self, in_channels, out_channels, mid_channels=None, surface_kernel_size=5, offset_scale=1.0):
+    def __init__(self, in_channels, out_channels, mid_channels=None, surface_kernel_size=5,
+                 offset_scale=1.0, point_chunk_size=5, checkpoint_sampling=True):
         super().__init__(
             in_channels,
             out_channels,
@@ -342,11 +403,14 @@ class DoubleAccumSurfaceConv(DoubleSurfaceConv):
             mode="accum",
             surface_kernel_size=surface_kernel_size,
             offset_scale=offset_scale,
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
         )
 
 
 class DoubleEquationSurfaceConv(DoubleSurfaceConv):
-    def __init__(self, in_channels, out_channels, mid_channels=None, surface_kernel_size=5, offset_scale=1.0):
+    def __init__(self, in_channels, out_channels, mid_channels=None, surface_kernel_size=5,
+                 offset_scale=1.0, point_chunk_size=5, checkpoint_sampling=True):
         super().__init__(
             in_channels,
             out_channels,
@@ -354,4 +418,6 @@ class DoubleEquationSurfaceConv(DoubleSurfaceConv):
             mode="equation",
             surface_kernel_size=surface_kernel_size,
             offset_scale=offset_scale,
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
         )
