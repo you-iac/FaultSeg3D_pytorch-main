@@ -7,12 +7,30 @@ except ImportError:
     from surface_conv3d import DoubleAccumSurfaceConv
 
 
-class Down(nn.Module):
+class DoubleConv(nn.Module):
+    """The ordinary Conv3d/BatchNorm/ReLU block used by faultseg3d_."""
+
     def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class Down(nn.Module):
+    def __init__(self, in_channels, out_channels, **surface_options):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool3d(2),
-            DoubleAccumSurfaceConv(in_channels, out_channels),
+            DoubleAccumSurfaceConv(in_channels, out_channels, **surface_options),
         )
 
     def forward(self, x):
@@ -20,10 +38,13 @@ class Down(nn.Module):
 
 
 class Up(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, use_surface=True, **surface_options):
         super().__init__()
         self.up = nn.Upsample(scale_factor=(2, 2, 2), mode="trilinear", align_corners=True)
-        self.conv = DoubleAccumSurfaceConv(in_channels, out_channels)
+        self.conv = (
+            DoubleAccumSurfaceConv(in_channels, out_channels, **surface_options)
+            if use_surface else DoubleConv(in_channels, out_channels)
+        )
 
     def forward(self, x1, x2):
         x1 = self.up(x1)
@@ -54,21 +75,35 @@ class OutConv(nn.Module):
 
 
 class FaultSeg3D(nn.Module):
-    """U-Net with cumulative-offset XZ/YZ dynamic surface convolutions."""
+    """U-Net with cumulative-offset surfaces below full resolution by default.
 
-    def __init__(self, n_channels, n_classes):
+    Set surface_at_full_resolution=True to retain the original architecture
+    (including its state-dict layout) with the optimized sampling implementation.
+    point_chunk_size trades temporary memory for throughput; all 25 points are
+    always used. checkpoint_sampling recomputes sampling chunks in backward.
+    """
+
+    def __init__(self, n_channels, n_classes, *, surface_at_full_resolution=False,
+                 point_chunk_size=5, checkpoint_sampling=True):
         super().__init__()
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        self.inc = DoubleAccumSurfaceConv(n_channels, 16)
-        self.down1 = Down(16, 32)
-        self.down2 = Down(32, 64)
-        self.down3 = Down(64, 128)
+        surface_options = dict(
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
+        )
+        self.inc = (
+            DoubleAccumSurfaceConv(n_channels, 16, **surface_options)
+            if surface_at_full_resolution else DoubleConv(n_channels, 16)
+        )
+        self.down1 = Down(16, 32, **surface_options)
+        self.down2 = Down(32, 64, **surface_options)
+        self.down3 = Down(64, 128, **surface_options)
 
-        self.up2 = Up(192, 64)
-        self.up3 = Up(96, 32)
-        self.up4 = Up(48, 16)
+        self.up2 = Up(192, 64, **surface_options)
+        self.up3 = Up(96, 32, **surface_options)
+        self.up4 = Up(48, 16, use_surface=surface_at_full_resolution, **surface_options)
         self.outc = OutConv(16, n_classes)
         self.softmax = nn.Softmax(dim=1)
 
