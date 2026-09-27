@@ -1,0 +1,152 @@
+import torch
+import torch.nn as nn
+from torchsummary import summary
+
+try:
+    from .surface_conv3d import DoubleAccumSurfaceConv
+except ImportError:
+    from surface_conv3d import DoubleAccumSurfaceConv
+
+
+class DoubleConv(nn.Module):
+    """The ordinary Conv3d/BatchNorm/ReLU block used by faultseg3d_."""
+
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm3d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class Down(nn.Module):
+    def __init__(self, in_channels, out_channels, **surface_options):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool3d(2),
+            DoubleAccumSurfaceConv(in_channels, out_channels, **surface_options),
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class Up(nn.Module):
+    def __init__(self, in_channels, out_channels, use_surface=True, **surface_options):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=(2, 2, 2), mode="trilinear", align_corners=True)
+        self.conv = (
+            DoubleAccumSurfaceConv(in_channels, out_channels, **surface_options)
+            if use_surface else DoubleConv(in_channels, out_channels)
+        )
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diff_z = x2.size(2) - x1.size(2)
+        diff_y = x2.size(3) - x1.size(3)
+        diff_x = x2.size(4) - x1.size(4)
+        x1 = nn.functional.pad(
+            x1,
+            [
+                diff_x // 2,
+                diff_x - diff_x // 2,
+                diff_y // 2,
+                diff_y - diff_y // 2,
+                diff_z // 2,
+                diff_z - diff_z // 2,
+            ],
+        )
+        return self.conv(torch.cat([x2, x1], dim=1))
+
+
+class OutConv(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class FaultSeg3D(nn.Module):
+    """U-Net with cumulative-offset surfaces below full resolution by default.
+
+    Set surface_at_full_resolution=True to retain the original architecture
+    (including its state-dict layout) with the optimized sampling implementation.
+    point_chunk_size trades temporary memory for throughput; all 25 points are
+    always used. checkpoint_sampling recomputes sampling chunks in backward.
+    """
+
+    def __init__(self, n_channels, n_classes, *, surface_at_full_resolution=False,
+                 point_chunk_size=5, checkpoint_sampling=True):
+        super().__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+
+        surface_options = dict(
+            point_chunk_size=point_chunk_size,
+            checkpoint_sampling=checkpoint_sampling,
+        )
+        self.inc = (
+            DoubleAccumSurfaceConv(n_channels, 16, **surface_options)
+            if surface_at_full_resolution else DoubleConv(n_channels, 16)
+        )
+        self.down1 = Down(16, 32, **surface_options)
+        self.down2 = Down(32, 64, **surface_options)
+        self.down3 = Down(64, 128, **surface_options)
+
+        self.up2 = Up(192, 64, **surface_options)
+        self.up3 = Up(96, 32, **surface_options)
+        self.up4 = Up(48, 16, use_surface=surface_at_full_resolution, **surface_options)
+        self.outc = OutConv(16, n_classes)
+        self.softmax = nn.Softmax(dim=1)
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+
+        x = self.up2(x4, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        logits = self.outc(x)
+        return self.softmax(logits)
+
+
+if __name__ == "__main__":
+    # 查看网络参数量
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    net = FaultSeg3D(1, 2).to(device)
+    summary(net, input_size=(1, 128, 128, 128))
+    net = FaultSeg3D(1, 2)
+
+    total_params = sum(p.numel() for p in net.parameters())
+    trainable_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    param_bytes = sum(p.numel() * p.element_size() for p in net.parameters())
+
+    print(f"总参数量：{total_params:,} ({total_params / 1e6:.3f} M)")
+    print(f"可训练参数量：{trainable_params:,}")
+    print(f"参数占用：{param_bytes / 1024 ** 2:.2f} MiB")
+"""
+================================================================
+Total params: 5,255,526
+Trainable params: 5,255,526
+Non-trainable params: 0
+----------------------------------------------------------------
+Input size (MB): 8.00
+Forward/backward pass size (MB): 8055.12
+Params size (MB): 20.05
+Estimated Total Size (MB): 8083.17
+----------------------------------------------------------------
+总参数量：5,255,526 (5.256 M)
+可训练参数量：5,255,526
+参数占用：20.05 MiB
+"""
