@@ -65,8 +65,8 @@ def slice_layout(ax, shape, axis, spacing):
     remaining = [a for a in range(3) if a != axis]
     vertical, horizontal = remaining
     names = ("D", "H", "W")
-    ax.set_xlabel(names[horizontal] + " coordinate")
-    ax.set_ylabel(names[vertical] + " coordinate")
+    ax.set_xlabel(names[horizontal])
+    ax.set_ylabel(names[vertical])
     ax.set_facecolor("#f1f4f8")
     extent = (-0.5 * spacing[horizontal], (shape[horizontal] - 0.5) * spacing[horizontal],
               (shape[vertical] - 0.5) * spacing[vertical], -0.5 * spacing[vertical])
@@ -102,15 +102,14 @@ def plot_3d(plt, label, normal, confidence, args):
     ax.set_ylim(-0.5, max(bounds[1], 0.5))
     ax.set_zlim(max(bounds[0], 0.5), -0.5)
     ax.set_box_aspect(np.maximum(bounds[[2, 1, 0]], 1))
-    ax.set_xlabel("W coordinate")
-    ax.set_ylabel("H coordinate")
-    ax.set_zlabel("D coordinate")
+    ax.set_xlabel("W")
+    ax.set_ylabel("H")
+    ax.set_zlabel("D")
     ax.view_init(elev=22, azim=-55)
-    ax.set_title("GT fault surface and local normals", fontsize=16, pad=18)
+    ax.set_title("GT fault surface & normals", fontsize=16, pad=18)
     scalar = plt.cm.ScalarMappable(norm=plt.Normalize(0, 1), cmap="viridis")
-    fig.colorbar(scalar, ax=ax, shrink=0.65, pad=0.07, label="Local plane confidence")
-    fig.suptitle(f"{args.label.stem}  |  {len(points):,} displayed GT points, {len(arrows)} normal arrows\n"
-                 "Orange arrows: normal axis (sign is arbitrary); background has no normals",
+    fig.colorbar(scalar, ax=ax, shrink=0.65, pad=0.07, label="Plane confidence")
+    fig.suptitle(f"{args.label.stem}  |  Orange: normals (sign arbitrary)",
                  fontsize=10, color="#475569")
     return fig, len(points), len(arrows)
 
@@ -143,9 +142,9 @@ def plot_normal_slices(plt, label, normal, confidence, slices, args):
                       pivot="middle", width=0.004, headwidth=3)
             ax.scatter(horizontal_position[~visible], vertical_position[~visible],
                        facecolors="none", edgecolors="#bd3d22", s=16, linewidths=0.8)
-        ax.set_title(f"{'DHW'[axis]} = {index}  |  projected normal", fontsize=12)
-    fig.suptitle("Local normal directions on three orthogonal slices\n"
-                 "Red arrow: in-plane projection; open circle: normal nearly perpendicular to the slice",
+        ax.set_title(f"{'DHW'[axis]} slice {index}", fontsize=12)
+    fig.suptitle("GT normal projections\n"
+                 "Arrows: in-plane; circles: nearly normal to slice",
                  fontsize=13)
     return fig
 
@@ -162,10 +161,10 @@ def plot_confidence(plt, label, confidence, slices, args):
         display = ax.imshow(masked, cmap=cmap, vmin=0, vmax=1,
                             interpolation="nearest", extent=extent, origin="upper")
         mean = confidence_slice[gt_slice > 0].mean() if gt_slice.any() else 0
-        ax.set_title(f"{'DHW'[axis]} = {index}  |  GT mean confidence {mean:.3f}", fontsize=12)
-    fig.colorbar(display, ax=list(axes), shrink=0.75, pad=0.02, label="Local plane confidence [0, 1]")
-    fig.suptitle("GT local-plane confidence weights\n"
-                 "Light gray: background (stored as zero); purple: unreliable GT geometry",
+        ax.set_title(f"{'DHW'[axis]} slice {index}  |  mean = {mean:.3f}", fontsize=12)
+    fig.colorbar(display, ax=list(axes), shrink=0.75, pad=0.02, label="Plane confidence")
+    fig.suptitle("GT plane confidence\n"
+                 "Gray: background; purple: low confidence",
                  fontsize=13)
     return fig
 

@@ -32,10 +32,10 @@ if __name__ == "__main__":
         cmap="gray",
     )
 
-    body_nodes = cigvis.create_bodys(
+    body_nodes = cigvis.create_bodies(
         y,
         level=0.5,
-        cmap="jet",
+        color="red",
     )
 
     if isinstance(body_nodes, list):
@@ -45,10 +45,11 @@ if __name__ == "__main__":
 
     cigvis.plot3D(
         nodes,
-        size=(700, 600),
-        savename="example.png",
-        xyz_axis=True,
-        azimuth=90,
-        elevation=70,
-        distance=500,
+        view={
+            "size": (700, 600),
+            "xyz_axis": True,
+            "azimuth": 90,
+            "elevation": 70,
+        },
+        save={"path": "example.png"},
     )

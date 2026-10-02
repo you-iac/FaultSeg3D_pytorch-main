@@ -39,10 +39,11 @@ if __name__ == "__main__":
 
     cigvis.plot3D(
         nodes,
-        size=(700, 600),
-        savename="example.png",
-        xyz_axis=True,
-        azimuth=80,
-        elevation=80,
-        distance=500,
+        view={
+            "size": (700, 600),
+            "xyz_axis": True,
+            "azimuth": 80,
+            "elevation": 80,
+        },
+        save={"path": "example.png"},
     )
